@@ -1,4 +1,4 @@
-use cgmath::{InnerSpace, Matrix3, Matrix4, Rad, Vector2, Vector3};
+use cgmath::{Array, InnerSpace, Matrix3, Matrix4, Rad, Vector2, Vector3, Zero};
 use encase::{ArrayLength, ShaderType, StorageBuffer, UniformBuffer};
 use std::{
     f32::consts::PI, path::Ancestors, sync::Arc, time::{Duration, Instant}
@@ -23,14 +23,19 @@ impl CameraController {
     fn update_camera(&mut self, camera: &mut Camera, dt: Duration) {
         const ANGULAR_SPEED: f32 = 1f32;
         let dt_seconds = dt.as_secs_f32();
-        let mut z_angle = Rad(0f32);
+        let mut rotvel = Vector3::<f32>::zero();
+        let z_rotvel = ANGULAR_SPEED * Vector3::unit_z();
+
         if self.q_pressed == ElementState::Pressed {
-            z_angle += Rad(-ANGULAR_SPEED * dt_seconds);
+            rotvel -= z_rotvel;
         }
         if self.e_pressed == ElementState::Pressed {
-            z_angle += Rad(ANGULAR_SPEED * dt_seconds);
+            rotvel += z_rotvel;
         }
-        camera.frame = camera.frame * Matrix3::from_angle_z(z_angle);
+        let axis = rotvel.normalize();
+        if axis.is_finite() {
+            camera.frame = camera.frame * Matrix3::from_axis_angle(axis, Rad(dt_seconds * rotvel.magnitude()));
+        }
     }
     fn process_window_event(&mut self, event: &winit::event::WindowEvent) {
         match event {
