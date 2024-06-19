@@ -1,0 +1,18 @@
+[package]
+name = "wormhole"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+winit = {version = "0.30"}
+# winit = {git = "https://github.com/rust-windowing/winit.git", branch="master"}
+wgpu = {version = "0.20"}
+# wgpu = {git = "https://github.com/gfx-rs/wgpu.git", branch="trunk"}
+pollster = {version = "0.3"}
+env_logger = {version = "0.11"}
+log = {version = "0.4"}
+bytemuck = {version = "1.16"}
+cgmath = {version = "0.18"}
+encase = {version = "0.8", features = ["cgmath"]}
