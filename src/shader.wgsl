@@ -49,8 +49,8 @@ struct TorusThroat {
     major_radius: f32,
     inner_minor_radius: f32,
     outer_minor_radius: f32,
-    transform: mat4x4<f32>, // object proportional to transform, assume normal form
-    inverse_transform: mat4x4<f32>,
+    to_ambient_transform: mat4x4<f32>, // object proportional to to_ambient_transform, assume normal form
+    to_local_transform: mat4x4<f32>,
 }
 
 struct Ambient {
@@ -145,7 +145,7 @@ fn torus_sdf(t: TorusThroat, qe: vec3<f32>) -> f32 {
     // we assume transform is a normal-form rotation + translation matrix
     // has to be modified to support scaling or other transforms, since Lipschitz constant changes
     // i.e. ql.w = 1
-    let ql = (t.transform * vec4(qe, 1.0)).xyz;
+    let ql = (t.to_local_transform * vec4(qe, 1.0)).xyz;
     let proj_delta = vec2(length(ql.xy)-t.major_radius, ql.z);
     return length(proj_delta)-t.outer_minor_radius;
 }
@@ -153,11 +153,11 @@ fn torus_sdf(t: TorusThroat, qe: vec3<f32>) -> f32 {
 // TODO: verify this works
 fn torus_sdf_general(t: TorusThroat, qe: vec3<f32>) -> f32 {
     // assume transform is in normal form, but doesn't have to be scaling
-    let ql = (t.transform * vec4(qe, 1.0));
+    let ql = (t.to_local_transform * vec4(qe, 1.0));
     let b = vec4(t.major_radius * normalize(ql.xy), 0.0, 1.0);
     let local_delta = ql - b;
     let lambda = t.outer_minor_radius/length(local_delta);
-    return length(t.inverse_transform * local_delta) * (1.0 - lambda);
+    return length(t.to_ambient_transform * local_delta) * (1.0 - lambda);
 }
 
 fn torus_transition_position(t: TorusThroat, q: vec3<f32>) -> vec3<f32> {
@@ -200,6 +200,27 @@ fn jac_torus_transition(t: TorusThroat, q: vec3<f32>) -> mat3x3<f32> {
 
 fn euclidean_inv_metric(q: vec3<f32>) -> mat3x3<f32> {
     return mat3x3(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0);
+}
+
+fn scene_sdf(qe: vec3<f32>) -> f32 {
+    var out: f32 = 1e20;
+    for (var i: u32 = 0; i < toruses.torusCount; i++) {
+        if (toruses.torusArray[i].ambient_index == camera.ambient_index) {
+            out = min(out, torus_sdf(toruses.torusArray[i], qe));
+        }
+    }
+    return out;
+}
+
+fn march_ray(tol: f32, big: f32, qv: TR3) -> TR3 {
+    // assumes normalized velocity
+    var out_q: vec3<f32> = qv.q;
+    var cur_sdf = scene_sdf(out_q);
+    while (cur_sdf > tol && cur_sdf < big) {
+        out_q += cur_sdf * qv.v;
+        cur_sdf = scene_sdf(out_q);
+    }
+    return TR3(out_q, qv.v);
 }
 
 // I should think about how to write to a structure like this
@@ -264,10 +285,20 @@ fn proj_ray_to_sphere_grid(ray: vec3<f32>) -> f32 {
 @compute @workgroup_size(16, 16)
 fn compute(@builtin(global_invocation_id) gid: vec3<u32>)
 {
+    let TOL: f32 = 1e-4;
+    let BIG: f32 = 1e2;
+
     let cid: vec2<u32> = clamp(gid.xy, vec2<u32>(0,0), screen.screenSize - vec2<u32>(1,1));
     let funny_ray: TR3 = pixel_to_camera_ray(camera, cid);
-    let value = proj_ray_to_sphere_grid(funny_ray.v);
-    screen.screenArray[cid.y * screen.screenSize.x + cid.x] = vec4(value, value, value, 1.0);
+    let marched_ray: TR3 = march_ray(TOL, BIG, funny_ray);
+    let value = proj_ray_to_sphere_grid(marched_ray.v);
+    var color: vec4<f32>;
+    if (scene_sdf(marched_ray.q) <= TOL) {
+        color = vec4(1.0, 0.0, 0.0, 1.0);
+    } else {
+        color = vec4(value, value, value, 1.0);
+    }
+    screen.screenArray[cid.y * screen.screenSize.x + cid.x] = color;
 }
 
 

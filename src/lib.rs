@@ -1,7 +1,12 @@
-use cgmath::{Array, InnerSpace, Matrix3, Matrix4, Rad, Vector2, Vector3, Zero};
+use cgmath::{
+    Array, InnerSpace, Matrix, Matrix3, Matrix4, Rad, SquareMatrix, Vector2, Vector3, Zero,
+};
 use encase::{ArrayLength, ShaderType, StorageBuffer, UniformBuffer};
 use std::{
-    f32::consts::PI, path::Ancestors, sync::Arc, time::{Duration, Instant}
+    f32::consts::PI,
+    path::Ancestors,
+    sync::Arc,
+    time::{Duration, Instant},
 };
 
 use wgpu::util::DeviceExt;
@@ -15,26 +20,52 @@ use winit::{
 };
 
 struct CameraController {
-    q_pressed: ElementState,
-    e_pressed: ElementState,
+    q_state: ElementState,
+    e_state: ElementState,
+    w_state: ElementState,
+    s_state: ElementState,
+    a_state: ElementState,
+    d_state: ElementState,
 }
 
 impl CameraController {
+    // TODO: modify this to use the metric
     fn update_camera(&mut self, camera: &mut Camera, dt: Duration) {
         const ANGULAR_SPEED: f32 = 1f32;
+        const LINEAR_SPEED: f32 = 8f32;
         let dt_seconds = dt.as_secs_f32();
+
+        let mut linvel = Vector3::<f32>::zero();
+        let z_linvel = LINEAR_SPEED * Vector3::unit_z();
+        let x_linvel = LINEAR_SPEED * Vector3::unit_x();
+
+        if self.w_state.is_pressed() {
+            linvel += z_linvel;
+        }
+        if self.s_state.is_pressed() {
+            linvel -= z_linvel;
+        }
+        if self.d_state.is_pressed() {
+            linvel += x_linvel;
+        }
+        if self.a_state.is_pressed() {
+            linvel -= x_linvel;
+        }
+        camera.centre += camera.frame * (dt_seconds * linvel);
+
         let mut rotvel = Vector3::<f32>::zero();
         let z_rotvel = ANGULAR_SPEED * Vector3::unit_z();
 
-        if self.q_pressed == ElementState::Pressed {
+        if self.q_state.is_pressed() {
             rotvel -= z_rotvel;
         }
-        if self.e_pressed == ElementState::Pressed {
+        if self.e_state.is_pressed() {
             rotvel += z_rotvel;
         }
         let axis = rotvel.normalize();
         if axis.is_finite() {
-            camera.frame = camera.frame * Matrix3::from_axis_angle(axis, Rad(dt_seconds * rotvel.magnitude()));
+            camera.frame =
+                camera.frame * Matrix3::from_axis_angle(axis, Rad(dt_seconds * rotvel.magnitude()));
         }
     }
     fn process_window_event(&mut self, event: &winit::event::WindowEvent) {
@@ -49,8 +80,13 @@ impl CameraController {
                     },
                 ..
             } => match code {
-                KeyCode::KeyQ => self.q_pressed = *state,
-                KeyCode::KeyE => self.e_pressed = *state,
+                // TODO: refactor this to have a single source of truth
+                KeyCode::KeyQ => self.q_state = *state,
+                KeyCode::KeyE => self.e_state = *state,
+                KeyCode::KeyW => self.w_state = *state,
+                KeyCode::KeyS => self.s_state = *state,
+                KeyCode::KeyA => self.a_state = *state,
+                KeyCode::KeyD => self.d_state = *state,
                 _ => {}
             },
             _ => {}
@@ -61,7 +97,12 @@ impl CameraController {
         let dx = delta.0 as f32;
         let dy = delta.1 as f32;
         let angle = ANGULAR_SPEED * (dx.powi(2) + dy.powi(2)).sqrt();
-        let axis = Vector3 { x: -dy, y: dx, z: 0.0 }.normalize();
+        let axis = Vector3 {
+            x: -dy,
+            y: dx,
+            z: 0.0,
+        }
+        .normalize();
         camera.frame = camera.frame * Matrix3::from_axis_angle(axis, Rad(angle));
     }
 }
@@ -81,8 +122,8 @@ struct TorusThroat {
     major_radius: f32,
     inner_minor_radius: f32,
     outer_minor_radius: f32,
-    transform: Matrix4<f32>, // object proportional to transform, assume normal form
-    inverse_transform: Matrix4<f32>,
+    to_ambient_transform: Matrix4<f32>, // object proportional, assume normal form
+    to_local_transform: Matrix4<f32>,
 }
 
 #[derive(ShaderType)]
@@ -402,28 +443,8 @@ impl<'a> ApplicationHandler for AppState<'a> {
                     });
 
                 let camera = Camera {
-                    frame: Matrix3 {
-                        x: Vector3 {
-                            x: 1.0,
-                            y: 0.0,
-                            z: 0.0,
-                        },
-                        y: Vector3 {
-                            x: 0.0,
-                            y: 1.0,
-                            z: 0.0,
-                        },
-                        z: Vector3 {
-                            x: 0.0,
-                            y: 0.0,
-                            z: -1.0,
-                        },
-                    },
-                    centre: Vector3 {
-                        x: 0.0,
-                        y: 0.0,
-                        z: 5.0,
-                    },
+                    frame: Matrix3::from_diagonal(Vector3::new(1.0, 1.0, -1.0)),
+                    centre: Vector3::new(0.0, 0.0, 5.0),
                     ambient_index: 0,
                     yfov: PI / 2.,
                 };
@@ -437,13 +458,40 @@ impl<'a> ApplicationHandler for AppState<'a> {
                 });
 
                 let camera_controller = CameraController {
-                    q_pressed: ElementState::Released,
-                    e_pressed: ElementState::Released,
+                    q_state: ElementState::Released,
+                    e_state: ElementState::Released,
+                    w_state: ElementState::Released,
+                    s_state: ElementState::Released,
+                    a_state: ElementState::Released,
+                    d_state: ElementState::Released,
                 };
 
                 let toruses = Toruses {
                     torus_count: ArrayLength,
-                    torus_array: vec![],
+                    torus_array: vec![
+                        TorusThroat {
+                            ambient_index: 0,
+                            opposite_index: 1,
+                            major_radius: 3.0,
+                            inner_minor_radius: 1.0,
+                            outer_minor_radius: 2.0,
+                            to_ambient_transform: Matrix4::identity(),
+                            to_local_transform: Matrix4::identity(),
+                        },
+                        TorusThroat {
+                            ambient_index: 0,
+                            opposite_index: 0,
+                            major_radius: 3.0,
+                            inner_minor_radius: 1.0,
+                            outer_minor_radius: 2.0,
+                            to_ambient_transform: Matrix4::from_translation(
+                                16.0f32 * Vector3::unit_x(),
+                            ),
+                            to_local_transform: Matrix4::from_translation(
+                                -16.0f32 * Vector3::unit_x(),
+                            ),
+                        },
+                    ],
                 };
 
                 let torus_buffer = {
