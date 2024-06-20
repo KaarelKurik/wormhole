@@ -68,6 +68,22 @@ struct TR3 {
     v: vec3<f32>,
 }
 
+struct InverseMetricJacobian {
+    x: mat3x3<f32>,
+    y: mat3x3<f32>,
+    z: mat3x3<f32>,
+}
+
+fn smootherstep(x: f32) -> f32 {
+    let y = clamp(x, 0.0, 1.0);
+    let main = y * y * y * (y * (6.0 * y - 15.0) + 10.0);
+}
+
+fn jac_smootherstep(x: f32) -> f32 {
+    let y = clamp(x, 0.0, 1.0);
+    return 30.0 * y * y * (y - 1.0) * (y - 1.0);
+}
+
 fn jac_proj_xy(q: vec3<f32>) -> mat3x2<f32> {
     return mat3x2(1.0, 0.0, 0.0, 1.0, 0.0, 0.0);
 }
@@ -160,6 +176,7 @@ fn torus_sdf_general(t: TorusThroat, qe: vec3<f32>) -> f32 {
     return length(t.to_ambient_transform * local_delta) * (1.0 - lambda);
 }
 
+// q in torus local coords
 fn torus_transition_position(t: TorusThroat, q: vec3<f32>) -> vec3<f32> {
     let opposite = toruses.torusArray[t.opposite_index];
 
@@ -198,8 +215,107 @@ fn jac_torus_transition(t: TorusThroat, q: vec3<f32>) -> mat3x3<f32> {
     return jac_b2 + jac_d2;
 }
 
+fn torus_linear_parameter(t: TorusThroat, ql: vec3<f32>) -> f32 {
+    let b = vec3(t.major_radius * normalize(ql.xy), 0.0);
+    let d = ql - b;
+
+    return (length(d)-t.inner_minor_radius)/(t.outer_minor_radius-t.inner_minor_radius);
+}
+
+fn jac_torus_linear_parameter(t: TorusThroat, ql: vec3<f32>) -> vec3<f32> {
+    let proj_xy = mat3x3(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0);
+    let proj_q = vec3(ql.xy, 0.0);
+    let jac_normalized_proj_q = jac_normalize3(proj_q) * proj_xy; // 3x3
+    let jac_b = t.major_radius * jac_normalized_proj_q; // 3x3
+    let b = t.major_radius * normalize(proj_q);
+    let d = ql - b;
+    let jac_d = jac_id3(ql) - jac_b; // 3x3
+    let jac_d_norm = jac_length3(d) * jac_d; // vec3 (1x3)
+
+    return jac_d_norm / (t.outer_minor_radius - t.inner_minor_radius);
+}
+
+fn torus_smooth_parameter(t: TorusThroat, ql: vec3<f32>) -> f32 {
+    return smootherstep(torus_linear_parameter(t, ql));
+}
+
+fn jac_torus_smooth_parameter(t: TorusThroat, ql: vec3<f32>) -> vec3<f32> {
+    return jac_smootherstep(torus_linear_parameter(t,ql)) * jac_torus_linear_parameter(t, ql);
+}
+
+fn torus_base_inv_metric(t: TorusThroat, ql: vec3<f32>) -> mat3x3<f32> {
+    let dropped = mat3x3(t.to_ambient_transform[0].xyz, t.to_ambient_transform[1].xyz, t.to_ambient_transform[2].xyz);
+    let qe = (t.to_ambient_transform * vec4(ql, 1.0)).xyz;
+    return dropped * euclidean_inv_metric(qe) * transpose(dropped);
+}
+
+fn jac_torus_base_inv_metric(t: TorusThroat, ql: vec3<f32>) -> InverseMetricJacobian {
+    let dropped = mat3x3(t.to_ambient_transform[0].xyz, t.to_ambient_transform[1].xyz, t.to_ambient_transform[2].xyz);
+    let dropped_t = transpose(dropped);
+    let qe = (t.to_ambient_transform * vec4(ql, 1.0)).xyz;
+    let jeim = jac_euclidean_inv_metric(qe);
+    
+    return InverseMetricJacobian(dropped * jeim.x * dropped_t, dropped * jeim.y * dropped_t, dropped * jeim.z * dropped_t);
+}
+
+fn torus_inv_metric(t: TorusThroat, ql: vec3<f32>) -> mat3x3<f32> {
+    let local_base_inv_metric = torus_base_inv_metric(t, ql);
+    let opposite = toruses.torusArray[t.opposite_index];
+    let opposite_point = torus_transition_position(t, ql);
+    let opposite_base_inv_metric = torus_base_inv_metric(opposite, opposite_point);
+    let lambda = torus_smooth_parameter(t, ql);
+    let rho = torus_smooth_parameter(opposite, opposite_point);
+    return lambda * local_base_inv_metric + rho * opposite_base_inv_metric;
+}
+
+fn jac_torus_inv_metric(t: TorusThroat, ql: vec3<f32>) -> InverseMetricJacobian {
+    let lbim = torus_base_inv_metric(t, ql);
+    let opposite = toruses.torusArray[t.opposite_index];
+    let opposite_point = torus_transition_position(t, ql);
+    let obim = torus_base_inv_metric(opposite, opposite_point);
+
+    let transition_jac = jac_torus_transition(t, ql);
+
+    let lambda = torus_smooth_parameter(t, ql);
+    let rho = torus_smooth_parameter(opposite, opposite_point);
+
+    let lambda_jac = jac_torus_smooth_parameter(t, ql);
+    let rho_jac = jac_torus_smooth_parameter(opposite, opposite_point) * transition_jac;
+    
+    let lbim_jac = jac_torus_base_inv_metric(t, ql);
+    let obim_jac_fx = jac_torus_base_inv_metric(opposite, opposite_point);
+
+    let obim_jac = InverseMetricJacobian(
+        transition_jac[0].x * obim_jac_fx.x + transition_jac[0].y * obim_jac_fx.y + transition_jac[0].z * obim_jac_fx.z,
+        transition_jac[1].x * obim_jac_fx.x + transition_jac[1].y * obim_jac_fx.y + transition_jac[1].z * obim_jac_fx.z,
+        transition_jac[2].x * obim_jac_fx.x + transition_jac[2].y * obim_jac_fx.y + transition_jac[2].z * obim_jac_fx.z,
+    );
+
+    let param_component = InverseMetricJacobian(
+        lambda_jac.x * lbim + rho_jac.x * obim,
+        lambda_jac.y * lbim + rho_jac.y * obim,
+        lambda_jac.z * lbim + rho_jac.z * obim,
+    );
+
+    let im_component = InverseMetricJacobian(
+        lambda * lbim_jac.x + rho * obim_jac.x,
+        lambda * lbim_jac.y + rho * obim_jac.y,
+        lambda * lbim_jac.z + rho * obim_jac.z,
+    );
+
+    return InverseMetricJacobian(
+        param_component.x + im_component.x,
+        param_component.y + im_component.y,
+        param_component.z + im_component.z,
+    );
+}
+
 fn euclidean_inv_metric(q: vec3<f32>) -> mat3x3<f32> {
     return mat3x3(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0);
+}
+
+fn jac_euclidean_inv_metric(q: vec3<f32>) -> InverseMetricJacobian {
+    return InverseMetricJacobian(mat3x3<f32>(), mat3x3<f32>(), mat3x3<f32>());
 }
 
 fn scene_sdf(qe: vec3<f32>) -> f32 {
