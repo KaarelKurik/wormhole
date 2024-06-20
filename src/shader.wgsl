@@ -55,15 +55,18 @@ struct TorusThroat {
 
 struct Ambient {
     background_index: u32, // into skybox texture array i.g.?
+    throat_count: u32,
     throat_indices: array<u32>,
 }
 
 struct PhaseRay {
+    ambient_index: u32,
     q: vec3<f32>, // position
     p: vec3<f32>, // momentum (transpose)
 }
 
 struct TR3 {
+    ambient_index: u32,
     q: vec3<f32>,
     v: vec3<f32>,
 }
@@ -177,6 +180,7 @@ fn torus_sdf_general(t: TorusThroat, qe: vec3<f32>) -> f32 {
 }
 
 // q in torus local coords
+// should satisfy q = torus_transition_position(t.opposite, torus_transition_position(t, q))
 fn torus_transition_position(t: TorusThroat, q: vec3<f32>) -> vec3<f32> {
     let opposite = toruses.torusArray[t.opposite_index];
 
@@ -336,7 +340,74 @@ fn march_ray(tol: f32, big: f32, qv: TR3) -> TR3 {
         out_q += cur_sdf * qv.v;
         cur_sdf = scene_sdf(out_q);
     }
-    return TR3(out_q, qv.v);
+    return TR3(qv.ambient_index, out_q, qv.v);
+}
+
+fn phase_velocity(t: TorusThroat, local_ray: PhaseRay) -> PhaseRay {
+    let p = local_ray.p;
+    let im = torus_inv_metric(t, local_ray.q);
+    let jac_im = jac_torus_inv_metric(t, local_ray.q);
+    let qvel = im * p;
+    let pvel = -0.5 * (vec3(dot(p, jac_im.x * p), dot(p, jac_im.y * p), dot(p, jac_im.z * p)));
+    return PhaseRay(local_ray.ambient_index, qvel, pvel);
+}
+
+struct HorseStatus {
+    exited: bool,
+    iters_left: u32,
+    ray: PhaseRay,
+}
+
+fn local_ray_to_tr3(t: TorusThroat, rl: PhaseRay) -> TR3 {
+    let im = torus_inv_metric(t, rl.q);
+    let qvel = im * rl.p;
+    return TR3(rl.ambient_index, rl.q, qvel);
+}
+
+// RK4 for now
+fn horse_steppin(
+    t: TorusThroat,
+    exit_linparam: f32,
+    transition_linparam: f32,
+    dt: f32,
+    max_iter: u32,
+    local_ray: PhaseRay,
+) -> HorseStatus {
+    var q = local_ray.q;
+    var p = local_ray.p;
+    var ambient_index = local_ray.ambient_index;
+
+    var cur_torus = t;
+
+    var cur_linparam = torus_linear_parameter(t, q);
+    var iters = 0u;
+
+    while (cur_linparam < exit_linparam && iters < max_iter) {
+        iters += 1u;
+
+        let k1 = phase_velocity(cur_torus, local_ray);
+        let s1 = PhaseRay(ambient_index, q + (dt/2.)*k1.q, p + (dt/2.)*k1.p);
+        let k2 = phase_velocity(cur_torus, s1);
+        let s2 = PhaseRay(ambient_index, q + (dt/2.)*k2.q, p + (dt/2.)*k2.p);
+        let k3 = phase_velocity(cur_torus, s2);
+        let s3 = PhaseRay(ambient_index, q + dt * k3.q, p + dt * k3.p);
+        let k4 = phase_velocity(cur_torus, s3);
+        q += (dt)*(k1.q + 2. * k2.q + 2. * k3.q + k4.q)/6.;
+        p += (dt)*(k1.p + 2. * k2.p + 2. * k3.p + k4.p)/6.;
+        cur_linparam = torus_linear_parameter(cur_torus, q);
+
+        if (cur_linparam < transition_linparam) {
+            q = torus_transition_position(cur_torus, q);
+            cur_torus = toruses.torusArray[cur_torus.opposite_index];
+            let back_jac = jac_torus_transition(cur_torus, q);
+            p = p * back_jac;
+            cur_linparam = torus_linear_parameter(cur_torus, q);
+            ambient_index = cur_torus.ambient_index;
+        }
+    }
+    let outray = PhaseRay(ambient_index, q, p);
+
+    return HorseStatus(!(cur_linparam < exit_linparam), max_iter - iters, outray);
 }
 
 // I should think about how to write to a structure like this
@@ -379,7 +450,7 @@ fn pixel_to_camera_ray(c: Camera, pixel_coords: vec2<u32>) -> TR3 {
     let centered_coords = fl_coords - (screen_bounds)/2.;
     let frame_scale = (2./screen_bounds.y) * tan(c.yfov/2.); // small number!
     let unnormed_ray = (c.frame * vec3(centered_coords, 1./frame_scale));
-    return TR3(c.centre, normalize(unnormed_ray));
+    return TR3(c.ambient_index, c.centre, normalize(unnormed_ray));
 }
 
 // [0,2pi]
