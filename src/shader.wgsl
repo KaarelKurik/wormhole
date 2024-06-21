@@ -322,25 +322,44 @@ fn jac_euclidean_inv_metric(q: vec3<f32>) -> InverseMetricJacobian {
     return InverseMetricJacobian(mat3x3<f32>(), mat3x3<f32>(), mat3x3<f32>());
 }
 
-fn scene_sdf(qe: vec3<f32>) -> f32 {
-    var out: f32 = 1e20;
-    for (var i: u32 = 0; i < toruses.torusCount; i++) {
-        if (toruses.torusArray[i].ambient_index == camera.ambient_index) {
-            out = min(out, torus_sdf(toruses.torusArray[i], qe));
-        }
-    }
-    return out;
+// TODO: replace global torus index with local one
+struct SDFStatus {
+    value: f32,
+    min_index: u32, // into torus array
 }
 
-fn march_ray(tol: f32, big: f32, qv: TR3) -> TR3 {
+// TODO: iterate over local toruses, not all toruses
+fn scene_sdf(qe: vec3<f32>) -> SDFStatus {
+    var out: f32 = 1e20;
+    var min_index: u32 = 0u;
+    for (var i: u32 = 0; i < toruses.torusCount; i++) {
+        if (toruses.torusArray[i].ambient_index == camera.ambient_index) {
+            let cur_sdf = torus_sdf(toruses.torusArray[i], qe);
+            if (cur_sdf < out) {
+                min_index = i;
+                out = cur_sdf;
+            }
+        }
+    }
+    return SDFStatus(out, min_index);
+}
+
+struct MarchStatus {
+    intersected: bool,
+    intersection_index: u32,
+    ray: TR3,
+}
+
+fn march_ray(tol: f32, big: f32, qv: TR3) -> MarchStatus {
     // assumes normalized velocity
     var out_q: vec3<f32> = qv.q;
     var cur_sdf = scene_sdf(out_q);
-    while (cur_sdf > tol && cur_sdf < big) {
-        out_q += cur_sdf * qv.v;
+    while (cur_sdf.value > tol && cur_sdf.value < big) {
+        out_q += cur_sdf.value * qv.v;
         cur_sdf = scene_sdf(out_q);
     }
-    return TR3(qv.ambient_index, out_q, qv.v);
+    let intersected = !(cur_sdf.value > tol);
+    return MarchStatus(intersected, cur_sdf.min_index, TR3(qv.ambient_index, out_q, qv.v));
 }
 
 fn phase_velocity(t: TorusThroat, local_ray: PhaseRay) -> PhaseRay {
@@ -362,6 +381,33 @@ fn local_ray_to_tr3(t: TorusThroat, rl: PhaseRay) -> TR3 {
     let im = torus_inv_metric(t, rl.q);
     let qvel = im * rl.p;
     return TR3(rl.ambient_index, rl.q, qvel);
+}
+
+fn funnydet(a: f32, b: f32, c: f32, d: f32) -> f32 {
+    return determinant(mat2x2(a,b,c,d));
+}
+
+fn invert_matrix3(m : mat3x3<f32>) -> mat3x3<f32> {
+    let cofactor = mat3x3(
+         funnydet(m[1][1], m[1][2], m[2][1], m[2][2]),
+        -funnydet(m[1][0], m[1][2], m[2][0], m[2][2]),
+         funnydet(m[1][0], m[1][1], m[2][0], m[2][1]),
+         
+        -funnydet(m[0][1], m[0][2], m[2][1], m[2][2]),
+         funnydet(m[0][0], m[0][2], m[2][0], m[2][2]),
+        -funnydet(m[0][0], m[0][1], m[2][0], m[2][1]),
+
+         funnydet(m[0][1], m[0][2], m[1][1], m[1][2]),
+        -funnydet(m[0][0], m[0][2], m[1][0], m[1][2]),
+         funnydet(m[0][0], m[0][1], m[1][0], m[1][1])
+    );
+    return (1.0/determinant(m)) * transpose(cofactor);
+}
+
+fn local_tr3_to_ray(t: TorusThroat, ql: TR3) -> PhaseRay {
+    let im = torus_inv_metric(t, ql.q);
+    let p = invert_matrix3(im) * ql.v;
+    return PhaseRay(ql.ambient_index, ql.q, p);
 }
 
 // RK4 for now
@@ -477,11 +523,11 @@ fn compute(@builtin(global_invocation_id) gid: vec3<u32>)
 
     let cid: vec2<u32> = clamp(gid.xy, vec2<u32>(0,0), screen.screenSize - vec2<u32>(1,1));
     let funny_ray: TR3 = pixel_to_camera_ray(camera, cid);
-    let marched_ray: TR3 = march_ray(TOL, BIG, funny_ray);
-    let value = proj_ray_to_sphere_grid(marched_ray.v);
+    let marched_ray_status: MarchStatus = march_ray(TOL, BIG, funny_ray);
+    let value = proj_ray_to_sphere_grid(marched_ray_status.ray.v);
     var color: vec4<f32>;
-    if (scene_sdf(marched_ray.q) <= TOL) {
-        color = vec4(1.0, 0.0, 0.0, 1.0);
+    if (marched_ray_status.intersected) {
+        color[marched_ray_status.intersection_index] = 1.0;
     } else {
         color = vec4(value, value, value, 1.0);
     }
