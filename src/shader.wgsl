@@ -375,6 +375,7 @@ struct HorseStatus {
     exited: bool,
     iters_left: u32,
     ray: PhaseRay,
+    torus: TorusThroat,
 }
 
 fn local_ray_to_tr3(t: TorusThroat, rl: PhaseRay) -> TR3 {
@@ -408,6 +409,10 @@ fn local_tr3_to_ray(t: TorusThroat, ql: TR3) -> PhaseRay {
     let im = torus_inv_metric(t, ql.q);
     let p = invert_matrix3(im) * ql.v;
     return PhaseRay(ql.ambient_index, ql.q, p);
+}
+
+fn tr3_transform(pos_transform: mat4x4<f32>, qv: TR3) -> TR3 {
+    return TR3(qv.ambient_index, (pos_transform * vec4(qv.q, 1.0)).xyz, (pos_transform * vec4(qv.v, 0.0)).xyz);
 }
 
 // RK4 for now
@@ -453,7 +458,61 @@ fn horse_steppin(
     }
     let outray = PhaseRay(ambient_index, q, p);
 
-    return HorseStatus(!(cur_linparam < exit_linparam), max_iter - iters, outray);
+    return HorseStatus(!(cur_linparam < exit_linparam), max_iter - iters, outray, cur_torus);
+}
+
+struct ChurnStatus {
+    escaped: bool,
+    ray: TR3,
+}
+
+fn churn_ray(qv0: TR3) -> ChurnStatus {
+    let TOL: f32 = 1e-4;
+    let BIG: f32 = 1e2;
+    let DT: f32 = 1e-2;
+    let TRANSITION_LINPARAM: f32 = 0.3;
+    var iters_left = 300u;
+
+    var phase_ray = PhaseRay();
+    var arrow = qv0;
+
+    var march_status = MarchStatus();
+    var horse_status = HorseStatus();
+
+    var t = TorusThroat();
+
+    var phase_ray_is_current = false;
+    var escaped = false;
+    var stuck = false;
+
+    var exit_linparam: f32 = 0.0;
+
+    while (iters_left > 0) {
+        if (!phase_ray_is_current) {
+            // arrow must be a valid ambient TR3
+            march_status = march_ray(TOL, BIG, arrow);
+            escaped = !march_status.intersected;
+            arrow = march_status.ray;
+            if (escaped) {break;}
+            t = toruses.torusArray[march_status.intersection_index];
+            arrow = tr3_transform(t.to_local_transform, arrow);
+            phase_ray = local_tr3_to_ray(t, arrow);
+            phase_ray_is_current = true;
+            // set exit linparam
+            exit_linparam = 2.0 * torus_linear_parameter(t, phase_ray.q);
+        } else {
+            horse_status = horse_steppin(t, exit_linparam, TRANSITION_LINPARAM, DT, iters_left, phase_ray);
+            t = horse_status.torus;
+            iters_left = horse_status.iters_left;
+            stuck = !horse_status.exited;
+            if (stuck) {break;}
+            arrow = local_ray_to_tr3(t, horse_status.ray);
+            arrow = tr3_transform(t.to_ambient_transform, arrow);
+            arrow.v = normalize(arrow.v); // should be a no-op technically, but TODO: make sure
+            phase_ray_is_current = false;
+        }
+    }
+    return ChurnStatus(escaped, arrow);
 }
 
 // I should think about how to write to a structure like this
