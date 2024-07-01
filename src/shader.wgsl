@@ -71,7 +71,13 @@ struct TR3 {
     v: vec3<f32>,
 }
 
-struct InverseMetricJacobian {
+struct InverseMetricJacobian { // varies over derivative
+    x: mat3x3<f32>,
+    y: mat3x3<f32>,
+    z: mat3x3<f32>,
+}
+
+struct TransitionHessian { // x,y,z varies over outer derivative
     x: mat3x3<f32>,
     y: mat3x3<f32>,
     z: mat3x3<f32>,
@@ -80,6 +86,7 @@ struct InverseMetricJacobian {
 fn smootherstep(x: f32) -> f32 {
     let y = clamp(x, 0.0, 1.0);
     let main = y * y * y * (y * (6.0 * y - 15.0) + 10.0);
+    return main;
 }
 
 fn jac_smootherstep(x: f32) -> f32 {
@@ -99,6 +106,17 @@ fn jac_length2(q: vec2<f32>) -> vec2<f32> {
 fn jac_length3(q: vec3<f32>) -> vec3<f32> {
     var l = length(q);
     return q/l;
+}
+
+fn hess_length3(q: vec3<f32>) -> mat3x3<f32> {
+    let l = length(q);
+    let jacl = jac_length3(q);
+    let lsq = l * l;
+    return mat3x3<f32>(
+        vec3(1.0, 0.0, 0.0)/l - (q*jacl.x)/lsq,
+        vec3(0.0, 1.0, 0.0)/l - (q*jacl.y)/lsq,
+        vec3(0.0, 0.0, 1.0)/l - (q*jacl.z)/lsq,
+    );
 }
 
 fn jac_scale2(l: f32, q: vec2<f32>) -> mat3x2<f32> {
@@ -150,6 +168,25 @@ fn tensor_3x3(a: vec3<f32>, b: vec3<f32>) -> mat3x3<f32> {
     return mat3x3(b.x * a, b.y * a, b.z * a);
 }
 
+fn jac_self_tensor_3x3(q: vec3<f32>) -> TransitionHessian {
+    let mx = mat3x3(
+        2.0*q.x,     q.y,     q.z,
+            q.y,     0.0,     0.0,
+            q.z,     0.0,     0.0
+    );
+    let my = mat3x3(
+            0.0,     q.x,     0.0,
+            q.x, 2.0*q.y,     q.z,
+            0.0,     q.z,     0.0
+    );
+    let mz = mat3x3(
+            0.0,     0.0,     q.x,
+            0.0,     0.0,     q.y,
+            q.x,     q.y, 2.0*q.z
+    );
+    return TransitionHessian(mx, my, mz);
+}
+
 fn jac_normalize2(q: vec2<f32>) -> mat2x2<f32> {
     let il = 1.0/length(q);
     return (il * jac_id2(q)) - ((il * il * il)*tensor_2x2(q,q));
@@ -158,6 +195,31 @@ fn jac_normalize2(q: vec2<f32>) -> mat2x2<f32> {
 fn jac_normalize3(q: vec3<f32>) -> mat3x3<f32> {
     let il = 1.0/length(q);
     return (il * jac_id3(q)) - ((il * il * il)*tensor_3x3(q,q));
+}
+
+fn hess_normalize3(q: vec3<f32>) -> TransitionHessian {
+    let il = 1.0/length(q);
+    let jac_il = - (il * il * il) * q; // 1x3
+    let jid3 = jac_id3(q);
+    let first_term_hess = TransitionHessian(
+        jac_il.x * jid3,
+        jac_il.y * jid3,
+        jac_il.z * jid3,
+    );
+    let jac_il_cubed = 3.0 * il * il * jac_il; // 1x3
+    let jst = jac_self_tensor_3x3(q);
+    let il_cubed = (il * il * il);
+    let st = tensor_3x3(q,q);
+    let second_term_hess = TransitionHessian(
+        jac_il_cubed.x * st + il_cubed * jst.x,
+        jac_il_cubed.y * st + il_cubed * jst.y,
+        jac_il_cubed.z * st + il_cubed * jst.z,
+    );
+    return TransitionHessian(
+        first_term_hess.x - second_term_hess.x,
+        first_term_hess.y - second_term_hess.y,
+        first_term_hess.z - second_term_hess.z,
+    );
 }
 
 fn torus_sdf(t: TorusThroat, qe: vec3<f32>) -> f32 {
@@ -190,9 +252,23 @@ fn torus_transition_position(t: TorusThroat, q: vec3<f32>) -> vec3<f32> {
     let gap2 = opposite.outer_minor_radius - opposite.inner_minor_radius;
     let d2_norm = ((t.outer_minor_radius - length(d1))/gap1)*gap2 + opposite.inner_minor_radius;
     let d2 = d2_norm * normalize(d1);
-    let b2 = opposite.outer_minor_radius * normalize(b1);
+    let b2 = opposite.major_radius * normalize(b1);
 
     return b2 + d2;
+}
+
+fn simple_jac_torus_transition(t: TorusThroat, q: vec3<f32>) -> mat3x3<f32> {
+    let DEL = 0.005;
+    let INVDEL = 1.0/DEL;
+    let m = torus_transition_position(t, q);
+    let mdx = torus_transition_position(t, q + vec3(DEL, 0.0, 0.0));
+    let mdy = torus_transition_position(t, q + vec3(0.0, DEL, 0.0));
+    let mdz = torus_transition_position(t, q + vec3(0.0, 0.0, DEL));
+    return mat3x3(
+        INVDEL * (mdx - m),
+        INVDEL * (mdy - m),
+        INVDEL * (mdz - m),
+    );
 }
 
 fn jac_torus_transition(t: TorusThroat, q: vec3<f32>) -> mat3x3<f32> {
@@ -217,6 +293,109 @@ fn jac_torus_transition(t: TorusThroat, q: vec3<f32>) -> mat3x3<f32> {
     let jac_b2 = opposite.major_radius * jac_normalized_proj_q1;
 
     return jac_b2 + jac_d2;
+}
+
+fn hess_torus_transition(t: TorusThroat, q: vec3<f32>) -> TransitionHessian {
+// preamble
+    let proj_xy = mat3x3(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0);
+    let proj_q1 = vec3(q.xy, 0.0);
+    let jac_normalized_proj_q1 = jac_normalize3(proj_q1) * proj_xy; // 3x3
+    let jac_b1 = t.major_radius * jac_normalized_proj_q1; // 3x3
+    let b1 = t.major_radius * normalize(proj_q1);
+    let d1 = q - b1;
+    let jac_d1 = jac_id3(q) - jac_b1; // 3x3
+    let jac_normalized_d1 = jac_normalize3(d1) * jac_d1; // 3x3
+    let jac_d1_norm = jac_length3(d1) * jac_d1; // vec3 (1x3)
+
+    let opposite = toruses.torusArray[t.opposite_index];
+
+    let gap1 = t.outer_minor_radius - t.inner_minor_radius;
+    let gap2 = opposite.outer_minor_radius - opposite.inner_minor_radius;
+    let d2_norm = ((t.outer_minor_radius - length(d1))/gap1)*gap2 + opposite.inner_minor_radius;
+    let jac_d2_norm = -(gap2/gap1) * jac_d1_norm; // vec3 (1x3)
+    let jac_d2 = (jac_normalized_d1) * d2_norm + tensor_3x3(normalize(d1), jac_d2_norm);
+
+    let jac_b2 = opposite.major_radius * jac_normalized_proj_q1;
+// end preamble
+    let jac_proj_q1 = proj_xy;
+
+    let zzz_bare = hess_normalize3(proj_q1);
+    let zzz_composed = TransitionHessian(
+        zzz_bare.x * jac_proj_q1[0].x + zzz_bare.y * jac_proj_q1[0].y + zzz_bare.z * jac_proj_q1[0].z,
+        zzz_bare.x * jac_proj_q1[1].x + zzz_bare.y * jac_proj_q1[1].y + zzz_bare.z * jac_proj_q1[1].z,
+        zzz_bare.x * jac_proj_q1[2].x + zzz_bare.y * jac_proj_q1[2].y + zzz_bare.z * jac_proj_q1[2].z,
+    );
+    let hess_normalized_proj_q1 = TransitionHessian(
+        zzz_composed.x * proj_xy,
+        zzz_composed.y * proj_xy,
+        zzz_composed.z * proj_xy,
+    );
+    let hess_b1 = TransitionHessian(
+        t.major_radius * hess_normalized_proj_q1.x,
+        t.major_radius * hess_normalized_proj_q1.y,
+        t.major_radius * hess_normalized_proj_q1.z,
+    );
+    let hess_d1 = TransitionHessian(
+        (-1.0) * hess_b1.x,
+        (-1.0) * hess_b1.y,
+        (-1.0) * hess_b1.z,
+    );
+
+    let hess_b2 = TransitionHessian(
+        opposite.major_radius * hess_normalized_proj_q1.x,
+        opposite.major_radius * hess_normalized_proj_q1.y,
+        opposite.major_radius * hess_normalized_proj_q1.z,
+    );
+
+    let jac_normalized_d1_raw = jac_normalize3(d1);
+    let hess_normalized_d1_raw = hess_normalize3(d1); // equiv to jac_jac_..._raw_raw
+    let jac_jac_normalized_d1_raw = TransitionHessian( // raw binds to inner jac
+        hess_normalized_d1_raw.x * jac_d1[0].x + hess_normalized_d1_raw.y * jac_d1[0].y + hess_normalized_d1_raw.z * jac_d1[0].z,
+        hess_normalized_d1_raw.x * jac_d1[1].x + hess_normalized_d1_raw.y * jac_d1[1].y + hess_normalized_d1_raw.z * jac_d1[1].z,
+        hess_normalized_d1_raw.x * jac_d1[2].x + hess_normalized_d1_raw.y * jac_d1[2].y + hess_normalized_d1_raw.z * jac_d1[2].z,
+    );
+
+    let hess_normalized_d1 = TransitionHessian(
+        jac_jac_normalized_d1_raw.x * jac_d1 + jac_normalized_d1 * hess_d1.x,
+        jac_jac_normalized_d1_raw.y * jac_d1 + jac_normalized_d1 * hess_d1.y,
+        jac_jac_normalized_d1_raw.z * jac_d1 + jac_normalized_d1 * hess_d1.z,
+    );
+
+    let hess_d1_norm_raw = hess_length3(d1);
+    let jac_jac_d1_norm_raw = mat3x3(
+        hess_d1_norm_raw.x * jac_d1[0].x + hess_d1_norm_raw.y * jac_d1[0].y + hess_d1_norm_raw.z * jac_d1[0].z,
+        hess_d1_norm_raw.x * jac_d1[1].x + hess_d1_norm_raw.y * jac_d1[1].y + hess_d1_norm_raw.z * jac_d1[1].z,
+        hess_d1_norm_raw.x * jac_d1[2].x + hess_d1_norm_raw.y * jac_d1[2].y + hess_d1_norm_raw.z * jac_d1[2].z,
+    );
+    let hess_d1_norm = mat3x3(
+        jac_jac_d1_norm_raw.x * jac_d1 + jac_d1_norm * hess_d1.x,
+        jac_jac_d1_norm_raw.y * jac_d1 + jac_d1_norm * hess_d1.y,
+        jac_jac_d1_norm_raw.z * jac_d1 + jac_d1_norm * hess_d1.z,
+    );
+    let hess_d2_norm = (-gap2/gap1) * hess_d1_norm;
+
+    let normalized_d1 = normalize(d1);
+    let jac_normalized_d1_times_jac_d2_norm = TransitionHessian(
+        tensor_3x3(jac_normalized_d1[0], jac_d2_norm) + tensor_3x3(normalized_d1, hess_d2_norm[0]),
+        tensor_3x3(jac_normalized_d1[1], jac_d2_norm) + tensor_3x3(normalized_d1, hess_d2_norm[1]),
+        tensor_3x3(jac_normalized_d1[2], jac_d2_norm) + tensor_3x3(normalized_d1, hess_d2_norm[2]),
+    );
+    let jac_d2_norm_scaling_jac_normalized_d1 = TransitionHessian(
+        hess_normalized_d1.x * d2_norm + jac_normalized_d1 * jac_d2_norm.x,
+        hess_normalized_d1.y * d2_norm + jac_normalized_d1 * jac_d2_norm.y,
+        hess_normalized_d1.z * d2_norm + jac_normalized_d1 * jac_d2_norm.z,
+    );
+    let hess_d2 = TransitionHessian(
+        jac_normalized_d1_times_jac_d2_norm.x + jac_d2_norm_scaling_jac_normalized_d1.x,
+        jac_normalized_d1_times_jac_d2_norm.y + jac_d2_norm_scaling_jac_normalized_d1.y,
+        jac_normalized_d1_times_jac_d2_norm.z + jac_d2_norm_scaling_jac_normalized_d1.z,
+    );
+
+    return TransitionHessian(
+        hess_b2.x + hess_d2.x,
+        hess_b2.y + hess_d2.y,
+        hess_b2.z + hess_d2.z,
+    );
 }
 
 fn torus_linear_parameter(t: TorusThroat, ql: vec3<f32>) -> f32 {
@@ -248,9 +427,14 @@ fn jac_torus_smooth_parameter(t: TorusThroat, ql: vec3<f32>) -> vec3<f32> {
 }
 
 fn torus_base_inv_metric(t: TorusThroat, ql: vec3<f32>) -> mat3x3<f32> {
-    let dropped = mat3x3(t.to_ambient_transform[0].xyz, t.to_ambient_transform[1].xyz, t.to_ambient_transform[2].xyz);
-    let qe = (t.to_ambient_transform * vec4(ql, 1.0)).xyz;
-    return dropped * euclidean_inv_metric(qe) * transpose(dropped);
+    // let dropped = mat3x3(t.to_ambient_transform[0].xyz, t.to_ambient_transform[1].xyz, t.to_ambient_transform[2].xyz);
+    // let qe = (t.to_ambient_transform * vec4(ql, 1.0)).xyz;
+    // return dropped * euclidean_inv_metric(qe) * transpose(dropped);
+    return mat3x3(
+        1.0, 0.0, 0.0,
+        0.0, 1.0, 0.0,
+        0.0, 0.0, 1.0,
+    );
 }
 
 fn jac_torus_base_inv_metric(t: TorusThroat, ql: vec3<f32>) -> InverseMetricJacobian {
@@ -262,6 +446,7 @@ fn jac_torus_base_inv_metric(t: TorusThroat, ql: vec3<f32>) -> InverseMetricJaco
     return InverseMetricJacobian(dropped * jeim.x * dropped_t, dropped * jeim.y * dropped_t, dropped * jeim.z * dropped_t);
 }
 
+// WRONG! I wasn't calculating the pullback of the opposite metric correctly.
 fn torus_inv_metric(t: TorusThroat, ql: vec3<f32>) -> mat3x3<f32> {
     let local_base_inv_metric = torus_base_inv_metric(t, ql);
     let opposite = toruses.torusArray[t.opposite_index];
@@ -269,16 +454,47 @@ fn torus_inv_metric(t: TorusThroat, ql: vec3<f32>) -> mat3x3<f32> {
     let opposite_base_inv_metric = torus_base_inv_metric(opposite, opposite_point);
     let lambda = torus_smooth_parameter(t, ql);
     let rho = torus_smooth_parameter(opposite, opposite_point);
-    return lambda * local_base_inv_metric + rho * opposite_base_inv_metric;
+
+    let rho_pullback = rho;
+    // let rho_pullback = 1.0-lambda;
+    let back_jac = simple_jac_torus_transition(opposite, opposite_point);
+    let opposite_base_inv_metric_pullback = back_jac * opposite_base_inv_metric * transpose(back_jac);
+    return lambda * local_base_inv_metric + rho_pullback * opposite_base_inv_metric_pullback;
 }
 
+fn simple_jac_torus_inv_metric(t: TorusThroat, ql: vec3<f32>) -> InverseMetricJacobian {
+    let DEL: f32 = 0.005;
+    let INVDEL: f32 = 1.0/DEL;
+    
+    let m = torus_inv_metric(t, ql);
+    let mdx = torus_inv_metric(t, ql + vec3(DEL, 0.0, 0.0));
+    let mdy = torus_inv_metric(t, ql + vec3(0.0, DEL, 0.0));
+    let mdz = torus_inv_metric(t, ql + vec3(0.0, 0.0, DEL));
+
+    return InverseMetricJacobian(
+        INVDEL * (mdx - m),
+        INVDEL * (mdy - m),
+        INVDEL * (mdz - m),
+    );
+}
+
+// Probably also wrong? It seems I need back_jac, and the Hessian of the transition.
 fn jac_torus_inv_metric(t: TorusThroat, ql: vec3<f32>) -> InverseMetricJacobian {
     let lbim = torus_base_inv_metric(t, ql);
     let opposite = toruses.torusArray[t.opposite_index];
     let opposite_point = torus_transition_position(t, ql);
-    let obim = torus_base_inv_metric(opposite, opposite_point);
 
     let transition_jac = jac_torus_transition(t, ql);
+    let back_jac = jac_torus_transition(opposite, opposite_point);
+    let jac_back_jac_1raw = hess_torus_transition(opposite, opposite_point);
+    let jac_back_jac = TransitionHessian(
+        jac_back_jac_1raw.x * transition_jac[0].x + jac_back_jac_1raw.y * transition_jac[0].y + jac_back_jac_1raw.z * transition_jac[0].z,
+        jac_back_jac_1raw.x * transition_jac[1].x + jac_back_jac_1raw.y * transition_jac[1].y + jac_back_jac_1raw.z * transition_jac[1].z,
+        jac_back_jac_1raw.x * transition_jac[2].x + jac_back_jac_1raw.y * transition_jac[2].y + jac_back_jac_1raw.z * transition_jac[2].z,
+    );
+
+    let obim = torus_base_inv_metric(opposite, opposite_point);
+    let obim_pullback = back_jac * obim * transpose(back_jac);
 
     let lambda = torus_smooth_parameter(t, ql);
     let rho = torus_smooth_parameter(opposite, opposite_point);
@@ -290,21 +506,27 @@ fn jac_torus_inv_metric(t: TorusThroat, ql: vec3<f32>) -> InverseMetricJacobian 
     let obim_jac_fx = jac_torus_base_inv_metric(opposite, opposite_point);
 
     let obim_jac = InverseMetricJacobian(
-        transition_jac[0].x * obim_jac_fx.x + transition_jac[0].y * obim_jac_fx.y + transition_jac[0].z * obim_jac_fx.z,
-        transition_jac[1].x * obim_jac_fx.x + transition_jac[1].y * obim_jac_fx.y + transition_jac[1].z * obim_jac_fx.z,
-        transition_jac[2].x * obim_jac_fx.x + transition_jac[2].y * obim_jac_fx.y + transition_jac[2].z * obim_jac_fx.z,
+        obim_jac_fx.x * transition_jac[0].x + obim_jac_fx.y * transition_jac[0].y + obim_jac_fx.z * transition_jac[0].z,
+        obim_jac_fx.x * transition_jac[1].x + obim_jac_fx.y * transition_jac[1].y + obim_jac_fx.z * transition_jac[1].z,
+        obim_jac_fx.x * transition_jac[2].x + obim_jac_fx.y * transition_jac[2].y + obim_jac_fx.z * transition_jac[2].z,
+    );
+
+    let obim_pullback_jac = InverseMetricJacobian(
+        jac_back_jac.x * obim * transpose(back_jac) + back_jac * obim_jac.x * transpose(back_jac) + back_jac * obim * transpose(jac_back_jac.x),
+        jac_back_jac.y * obim * transpose(back_jac) + back_jac * obim_jac.y * transpose(back_jac) + back_jac * obim * transpose(jac_back_jac.y),
+        jac_back_jac.z * obim * transpose(back_jac) + back_jac * obim_jac.z * transpose(back_jac) + back_jac * obim * transpose(jac_back_jac.z),
     );
 
     let param_component = InverseMetricJacobian(
-        lambda_jac.x * lbim + rho_jac.x * obim,
-        lambda_jac.y * lbim + rho_jac.y * obim,
-        lambda_jac.z * lbim + rho_jac.z * obim,
+        lambda_jac.x * lbim + rho_jac.x * obim_pullback,
+        lambda_jac.y * lbim + rho_jac.y * obim_pullback,
+        lambda_jac.z * lbim + rho_jac.z * obim_pullback,
     );
 
     let im_component = InverseMetricJacobian(
-        lambda * lbim_jac.x + rho * obim_jac.x,
-        lambda * lbim_jac.y + rho * obim_jac.y,
-        lambda * lbim_jac.z + rho * obim_jac.z,
+        lambda * lbim_jac.x + rho * obim_pullback_jac.x,
+        lambda * lbim_jac.y + rho * obim_pullback_jac.y,
+        lambda * lbim_jac.z + rho * obim_pullback_jac.z,
     );
 
     return InverseMetricJacobian(
@@ -365,7 +587,7 @@ fn march_ray(tol: f32, big: f32, qv: TR3) -> MarchStatus {
 fn phase_velocity(t: TorusThroat, local_ray: PhaseRay) -> PhaseRay {
     let p = local_ray.p;
     let im = torus_inv_metric(t, local_ray.q);
-    let jac_im = jac_torus_inv_metric(t, local_ray.q);
+    let jac_im = simple_jac_torus_inv_metric(t, local_ray.q);
     let qvel = im * p;
     let pvel = -0.5 * (vec3(dot(p, jac_im.x * p), dot(p, jac_im.y * p), dot(p, jac_im.z * p)));
     return PhaseRay(local_ray.ambient_index, qvel, pvel);
@@ -436,7 +658,8 @@ fn horse_steppin(
     while (cur_linparam < exit_linparam && iters < max_iter) {
         iters += 1u;
 
-        let k1 = phase_velocity(cur_torus, local_ray);
+        let s0 = PhaseRay(ambient_index, q, p);
+        let k1 = phase_velocity(cur_torus, s0);
         let s1 = PhaseRay(ambient_index, q + (dt/2.)*k1.q, p + (dt/2.)*k1.p);
         let k2 = phase_velocity(cur_torus, s1);
         let s2 = PhaseRay(ambient_index, q + (dt/2.)*k2.q, p + (dt/2.)*k2.p);
@@ -450,7 +673,7 @@ fn horse_steppin(
         if (cur_linparam < transition_linparam) {
             q = torus_transition_position(cur_torus, q);
             cur_torus = toruses.torusArray[cur_torus.opposite_index];
-            let back_jac = jac_torus_transition(cur_torus, q);
+            let back_jac = simple_jac_torus_transition(cur_torus, q);
             p = p * back_jac;
             cur_linparam = torus_linear_parameter(cur_torus, q);
             ambient_index = cur_torus.ambient_index;
@@ -463,13 +686,14 @@ fn horse_steppin(
 
 struct ChurnStatus {
     escaped: bool,
+    stuck: bool,
     ray: TR3,
 }
 
 fn churn_ray(qv0: TR3) -> ChurnStatus {
     let TOL: f32 = 1e-4;
     let BIG: f32 = 1e2;
-    let DT: f32 = 1e-2;
+    let DT: f32 = 0.03;
     let TRANSITION_LINPARAM: f32 = 0.3;
     var iters_left = 300u;
 
@@ -499,20 +723,23 @@ fn churn_ray(qv0: TR3) -> ChurnStatus {
             phase_ray = local_tr3_to_ray(t, arrow);
             phase_ray_is_current = true;
             // set exit linparam
-            exit_linparam = 2.0 * torus_linear_parameter(t, phase_ray.q);
+            exit_linparam = 1.01 * torus_linear_parameter(t, phase_ray.q);
         } else {
             horse_status = horse_steppin(t, exit_linparam, TRANSITION_LINPARAM, DT, iters_left, phase_ray);
             t = horse_status.torus;
             iters_left = horse_status.iters_left;
             stuck = !horse_status.exited;
-            if (stuck) {break;}
             arrow = local_ray_to_tr3(t, horse_status.ray);
             arrow = tr3_transform(t.to_ambient_transform, arrow);
-            arrow.v = normalize(arrow.v); // should be a no-op technically, but TODO: make sure
+
+            if (stuck) {break;} // this happens
+            // points of failure: tr3 is mistranslated to phase ray
+            // phase ray is not advanced correctly
+            // arrow.v = normalize(arrow.v); // should be a no-op technically, but TODO: make sure
             phase_ray_is_current = false;
         }
     }
-    return ChurnStatus(escaped, arrow);
+    return ChurnStatus(escaped, stuck, arrow);
 }
 
 // I should think about how to write to a structure like this
@@ -582,11 +809,13 @@ fn compute(@builtin(global_invocation_id) gid: vec3<u32>)
 
     let cid: vec2<u32> = clamp(gid.xy, vec2<u32>(0,0), screen.screenSize - vec2<u32>(1,1));
     let funny_ray: TR3 = pixel_to_camera_ray(camera, cid);
-    let marched_ray_status: MarchStatus = march_ray(TOL, BIG, funny_ray);
-    let value = proj_ray_to_sphere_grid(marched_ray_status.ray.v);
+    let churned_ray_status: ChurnStatus = churn_ray(funny_ray);
+    let value = proj_ray_to_sphere_grid(churned_ray_status.ray.v);
+
     var color: vec4<f32>;
-    if (marched_ray_status.intersected) {
-        color[marched_ray_status.intersection_index] = 1.0;
+    if (!churned_ray_status.escaped) {
+        color[0] = 1.0;
+        color[1] = f32(churned_ray_status.stuck);
     } else {
         color = vec4(value, value, value, 1.0);
     }
