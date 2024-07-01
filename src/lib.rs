@@ -311,7 +311,7 @@ impl<'a> ApplicationHandler for AppState<'a> {
                 let size = window.inner_size();
 
                 let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-                    backends: wgpu::Backends::VULKAN,
+                    backends: wgpu::Backends::VULKAN | wgpu::Backends::METAL,
                     ..Default::default()
                 });
 
