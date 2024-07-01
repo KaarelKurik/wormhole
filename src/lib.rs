@@ -13,6 +13,7 @@ use wgpu::util::DeviceExt;
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalSize,
+    error::ExternalError,
     event::{DeviceEvent, ElementState, KeyEvent, MouseButton, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
@@ -228,16 +229,23 @@ impl<'a> App<'a> {
     }
     fn toggle_mouse_capture(&mut self) {
         let new_mode = match self.mouse_capture_mode {
+            CursorGrabMode::None => CursorGrabMode::Locked,
+            CursorGrabMode::Confined => CursorGrabMode::None,
+            CursorGrabMode::Locked => CursorGrabMode::None,
+        };
+        let fallback_mode = match self.mouse_capture_mode {
             CursorGrabMode::None => CursorGrabMode::Confined,
             CursorGrabMode::Confined => CursorGrabMode::None,
-            _ => panic!("not supposed to occur!"),
+            CursorGrabMode::Locked => CursorGrabMode::None,
         };
         let visibility = match new_mode {
             CursorGrabMode::None => true,
             CursorGrabMode::Confined => false,
-            _ => todo!(),
+            CursorGrabMode::Locked => false,
         };
-        self.window.set_cursor_grab(new_mode).unwrap();
+        if let Err(_) = self.window.set_cursor_grab(new_mode) {
+            self.window.set_cursor_grab(fallback_mode).unwrap();
+        }
         self.window.set_cursor_visible(visibility);
 
         self.mouse_capture_mode = new_mode;
@@ -258,11 +266,14 @@ impl<'a> App<'a> {
         }
     }
     fn device_input(&mut self, event: &DeviceEvent) {
-        if self.mouse_capture_mode == CursorGrabMode::Confined {
-            if let DeviceEvent::MouseMotion { delta } = event {
-                self.camera_controller
-                    .process_mouse_motion(&mut self.camera, delta);
-            }
+        match self.mouse_capture_mode {
+            CursorGrabMode::Confined | CursorGrabMode::Locked => {
+                if let DeviceEvent::MouseMotion { delta } = event {
+                    self.camera_controller
+                        .process_mouse_motion(&mut self.camera, delta);
+                }
+            },
+            _ => {}
         }
     }
     fn update(&mut self, new_time: Instant) {
