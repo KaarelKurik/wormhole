@@ -83,6 +83,11 @@ struct TransitionHessian { // x,y,z varies over outer derivative
     z: mat3x3<f32>,
 }
 
+fn even_smoother(x: f32) -> f32 {
+    let y = clamp(x, 0.001, 0.999);
+    return 1.0/(1.0 + exp((1.0-2.0*y)/(y*(1.0-y))));
+}
+
 fn smootherstep(x: f32) -> f32 {
     let y = clamp(x, 0.0, 1.0);
     let main = y * y * y * (y * (6.0 * y - 15.0) + 10.0);
@@ -427,14 +432,9 @@ fn jac_torus_smooth_parameter(t: TorusThroat, ql: vec3<f32>) -> vec3<f32> {
 }
 
 fn torus_base_inv_metric(t: TorusThroat, ql: vec3<f32>) -> mat3x3<f32> {
-    // let dropped = mat3x3(t.to_ambient_transform[0].xyz, t.to_ambient_transform[1].xyz, t.to_ambient_transform[2].xyz);
-    // let qe = (t.to_ambient_transform * vec4(ql, 1.0)).xyz;
-    // return dropped * euclidean_inv_metric(qe) * transpose(dropped);
-    return mat3x3(
-        1.0, 0.0, 0.0,
-        0.0, 1.0, 0.0,
-        0.0, 0.0, 1.0,
-    );
+    let dropped = mat3x3(t.to_ambient_transform[0].xyz, t.to_ambient_transform[1].xyz, t.to_ambient_transform[2].xyz);
+    let qe = (t.to_ambient_transform * vec4(ql, 1.0)).xyz;
+    return dropped * euclidean_inv_metric(qe) * transpose(dropped);
 }
 
 fn jac_torus_base_inv_metric(t: TorusThroat, ql: vec3<f32>) -> InverseMetricJacobian {
