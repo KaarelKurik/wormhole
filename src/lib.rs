@@ -490,7 +490,7 @@ impl<'a> ApplicationHandler for AppState<'a> {
                             to_local_transform: Matrix4::identity(),
                         },
                         TorusThroat {
-                            ambient_index: 0,
+                            ambient_index: 1,
                             opposite_index: 0,
                             major_radius: 3.0,
                             inner_minor_radius: 1.0,

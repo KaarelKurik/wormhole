@@ -551,11 +551,11 @@ struct SDFStatus {
 }
 
 // TODO: iterate over local toruses, not all toruses
-fn scene_sdf(qe: vec3<f32>) -> SDFStatus {
+fn scene_sdf(qe: vec3<f32>, scene_index: u32) -> SDFStatus {
     var out: f32 = 1e20;
     var min_index: u32 = 0u;
     for (var i: u32 = 0; i < toruses.torusCount; i++) {
-        if (toruses.torusArray[i].ambient_index == camera.ambient_index) {
+        if (toruses.torusArray[i].ambient_index == scene_index) {
             let cur_sdf = torus_sdf(toruses.torusArray[i], qe);
             if (cur_sdf < out) {
                 min_index = i;
@@ -575,10 +575,10 @@ struct MarchStatus {
 fn march_ray(tol: f32, big: f32, qv: TR3) -> MarchStatus {
     // assumes normalized velocity
     var out_q: vec3<f32> = qv.q;
-    var cur_sdf = scene_sdf(out_q);
+    var cur_sdf = scene_sdf(out_q, qv.ambient_index);
     while (cur_sdf.value > tol && cur_sdf.value < big) {
         out_q += cur_sdf.value * qv.v;
-        cur_sdf = scene_sdf(out_q);
+        cur_sdf = scene_sdf(out_q, qv.ambient_index);
     }
     let intersected = !(cur_sdf.value > tol);
     return MarchStatus(intersected, cur_sdf.min_index, TR3(qv.ambient_index, out_q, qv.v));
@@ -816,8 +816,10 @@ fn compute(@builtin(global_invocation_id) gid: vec3<u32>)
     if (!churned_ray_status.escaped) {
         color[0] = 1.0;
         color[1] = f32(churned_ray_status.stuck);
+    } else if (churned_ray_status.ray.ambient_index == 0u){
+        color = vec4(value, 0.0, 0.0, 1.0);
     } else {
-        color = vec4(value, value, value, 1.0);
+        color = vec4(0.0, value, 0.0, 1.0);
     }
     screen.screenArray[cid.y * screen.screenSize.x + cid.x] = color;
 }
