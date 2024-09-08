@@ -593,6 +593,15 @@ fn phase_velocity(t: TorusThroat, local_ray: PhaseRay) -> PhaseRay {
     return PhaseRay(local_ray.ambient_index, qvel, pvel);
 }
 
+fn quasiellis_ambient_phase_velocity(ambient_ray: PhaseRay, major_radius: f32, n: f32) -> PhaseRay {
+    let p = ambient_ray.p;
+    let im = quasiellis_ambient_inv_metric(ambient_ray.q, major_radius, n);
+    let jac_im = simple_jac_quasiellis_ambient_inv_metric(ambient_ray.q, major_radius, n);
+    let qvel = im * p;
+    let pvel = -0.5 * (vec3(dot(p, jac_im.x * p), dot(p, jac_im.y * p), dot(p, jac_im.z * p)));
+    return PhaseRay(ambient_ray.ambient_index, qvel, pvel);
+}
+
 struct HorseStatus {
     exited: bool,
     iters_left: u32,
@@ -635,6 +644,152 @@ fn local_tr3_to_ray(t: TorusThroat, ql: TR3) -> PhaseRay {
 
 fn tr3_transform(pos_transform: mat4x4<f32>, qv: TR3) -> TR3 {
     return TR3(qv.ambient_index, (pos_transform * vec4(qv.q, 1.0)).xyz, (pos_transform * vec4(qv.v, 0.0)).xyz);
+}
+
+// hardcoding the wormhole for now
+fn quasiellis_ambient_r(ra: PhaseRay, major_radius: f32) -> f32
+{
+    let b = vec3(major_radius * normalize(ra.q.xy), 0.0);
+    let s = 1.0 - 2.0*f32(ra.ambient_index);
+    return s*length(ra.q-b);
+}
+
+fn axis_damper(shorp: f32) -> f32 {
+    return tanh(16.0 * shorp * shorp);
+}
+
+fn quasiellis_ambient_inv_metric(
+    qa: vec3<f32>,
+    major_radius: f32,
+    n:f32
+) -> mat3x3<f32> {
+    let q_xy_n = normalize(qa.xy);
+    let shorp = length(qa.xy);
+
+    let b = vec3(major_radius * q_xy_n, 0.0);
+    let d = qa - b;
+    let rsq = dot(d,d);
+
+    let unit_psi = vec3(-qa.z * q_xy_n, shorp - major_radius);
+    let scale_factor = (axis_damper(shorp)/(rsq + n*n)) - (1.0/(rsq));
+    let psi_component = scale_factor * tensor_3x3(unit_psi, unit_psi);
+    return mat3x3(
+        1.0, 0.0, 0.0,
+        0.0, 1.0, 0.0,
+        0.0, 0.0, 1.0,
+        ) + psi_component;
+}
+
+fn simple_jac_quasiellis_ambient_inv_metric(
+    qa: vec3<f32>,
+    major_radius: f32,
+    n: f32,
+) -> InverseMetricJacobian {
+    let DEL = 0.005;
+    let INVDEL = 1.0/DEL;
+    let m = quasiellis_ambient_inv_metric(qa, major_radius, n);
+    let mdx = quasiellis_ambient_inv_metric(qa + vec3(DEL, 0.0, 0.0), major_radius, n);
+    let mdy = quasiellis_ambient_inv_metric(qa + vec3(0.0, DEL, 0.0), major_radius, n);
+    let mdz = quasiellis_ambient_inv_metric(qa + vec3(0.0, 0.0, DEL), major_radius, n);
+
+    return InverseMetricJacobian(
+        INVDEL * (mdx - m),
+        INVDEL * (mdy - m),
+        INVDEL * (mdz - m),
+    );
+}
+
+fn quasiellis_hole_inv_metric(
+    qh: vec3<f32>,
+    major_radius: f32,
+    n: f32
+) -> mat3x3<f32> {
+    let shorp = major_radius + qh.x * cos(qh.z);
+    let scale_phi = 1.0/(shorp*shorp);
+    let scale_psi = axis_damper(shorp)/(qh.x * qh.x + n * n);
+    return mat3x3(
+        1.0, 0.0, 0.0,
+        0.0, scale_phi, 0.0,
+        0.0, 0.0, scale_psi,
+    );
+}
+
+// x,y,z to r,phi,psi
+fn to_hole_ray(ra: PhaseRay, major_radius: f32) -> PhaseRay
+{
+    let q = ra.q;
+    let q_xy_n = normalize(q.xy);
+    let b = vec3(major_radius * q_xy_n, 0.0);
+    let d = q - b;
+    let s = 1.0 - 2.0*f32(ra.ambient_index);
+    let r = s * length(d);
+
+    let phi = atan2(q.y, q.x);
+    let psi = atan2(d.z, length(d.xy));
+
+    let shorp = length(q.xy);
+    let cos_psi = (shorp - major_radius)/r;
+    let sin_psi = q.z/r;
+    // let cos_phi = q.x/shorp;
+    // let sin_phi = q.y/shorp;
+
+    let m = mat3x3(
+        vec3(q_xy_n * cos_psi, sin_psi),
+        vec3(-q.y, q.x, 0.0),
+        vec3(-q.z * q_xy_n, shorp - major_radius)
+    );
+    let np = ra.p * m;
+    let nq = vec3(r, phi, psi);
+    return PhaseRay(ra.ambient_index, nq, np);
+}
+
+fn to_ambient_ray(rh: PhaseRay, major_radius: f32) -> PhaseRay
+{
+    let q = rh.q;
+
+    let cos_psi = cos(q.z);
+    let sin_psi = sin(q.z);
+    let cos_phi = cos(q.y);
+    let sin_phi = sin(q.y);
+
+    let shorp = major_radius + q.x * cos_psi;
+    let xy_n = vec2(cos_phi, sin_phi);
+    let xy = shorp * xy_n;
+    let z = q.x * sin_psi;
+    let s = 1.0 - 2.0 * f32(rh.ambient_index);
+
+
+    let m = mat3x3(
+        vec3(xy_n * cos_psi, sin_psi),
+        vec3(-xy_n.y, xy_n.x, 0.0)/shorp,
+        vec3(-sin_psi * xy_n, cos_psi)/(q.x),
+    );
+
+    let np = m * rh.p;
+    let nq = vec3(xy, z);
+
+    let ns = s * sign(q.x);
+    let nix = u32((1.0 - ns)/2.0);
+    return PhaseRay(nix, nq, np);
+}
+
+fn quasiellis_march(
+    major_radius: f32,
+    transition_r: f32,
+    ambient_ray: PhaseRay,
+    dt: f32,
+    max_iter: u32,
+) {
+    var q = ambient_ray.q;
+    var p = ambient_ray.p;
+    var ambient_index = ambient_ray.ambient_index;
+
+    var r = quasiellis_ambient_r(ambient_ray, major_radius);
+    var iters = 0u;
+
+    while (r > transition_r && iters < max_iter) {
+        iters += 1u;
+    }
 }
 
 // RK4 for now
