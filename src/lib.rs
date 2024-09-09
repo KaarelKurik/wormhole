@@ -9,7 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use wgpu::util::DeviceExt;
+use wgpu::{include_spirv, util::DeviceExt};
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalSize,
@@ -171,20 +171,20 @@ impl<'a> App<'a> {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("encoder"),
             });
-        {
-            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("compute_pass"),
-                timestamp_writes: None,
-            });
-            compute_pass.set_pipeline(&self.compute_pipeline);
-            compute_pass.set_bind_group(0, &self.screen_bind_group, &[]);
-            compute_pass.set_bind_group(1, &self.bind_group_1, &[]);
-            compute_pass.dispatch_workgroups(
-                (self.size.width / 16) + 1,
-                (self.size.height / 16) + 1,
-                1,
-            );
-        }
+        // {
+        //     let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        //         label: Some("compute_pass"),
+        //         timestamp_writes: None,
+        //     });
+        //     compute_pass.set_pipeline(&self.compute_pipeline);
+        //     compute_pass.set_bind_group(0, &self.screen_bind_group, &[]);
+        //     compute_pass.set_bind_group(1, &self.bind_group_1, &[]);
+        //     compute_pass.dispatch_workgroups(
+        //         (self.size.width / 16) + 1,
+        //         (self.size.height / 16) + 1,
+        //         1,
+        //     );
+        // }
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("render_pass"),
@@ -372,6 +372,7 @@ impl<'a> ApplicationHandler for AppState<'a> {
                         label: Some("device"),
                         required_features: wgpu::Features::empty(),
                         required_limits: wgpu::Limits::default(),
+                        memory_hints: wgpu::MemoryHints::default(),
                     },
                     None,
                 );
@@ -379,10 +380,11 @@ impl<'a> ApplicationHandler for AppState<'a> {
 
                 surface.configure(&device, &surface_config); // causes segfault if device, surface_config die.
 
-                let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("shader"),
-                    source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
-                });
+                // let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    // label: Some("shader"),
+                    // source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
+                // });
+                let shader = device.create_shader_module(include_spirv!("simple.spv"));
 
                 let screen_bind_group_layout =
                     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -543,14 +545,16 @@ impl<'a> ApplicationHandler for AppState<'a> {
                         label: Some("compute_pipeline"),
                         layout: Some(&compute_pipeline_layout),
                         module: &shader,
-                        entry_point: "compute",
+                        entry_point: "main",
                         compilation_options: Default::default(),
+                        cache: None,
                     });
 
                 let render_pipeline_layout =
                     device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                         label: Some("render_pipeline_layout"),
-                        bind_group_layouts: &[&screen_bind_group_layout],
+                        // bind_group_layouts: &[&screen_bind_group_layout],
+                        bind_group_layouts: &[],
                         push_constant_ranges: &[],
                     });
 
@@ -560,7 +564,7 @@ impl<'a> ApplicationHandler for AppState<'a> {
                         layout: Some(&render_pipeline_layout),
                         vertex: wgpu::VertexState {
                             module: &shader,
-                            entry_point: "vertex",
+                            entry_point: "main",
                             compilation_options: Default::default(),
                             buffers: &[],
                         },
@@ -581,7 +585,7 @@ impl<'a> ApplicationHandler for AppState<'a> {
                         },
                         fragment: Some(wgpu::FragmentState {
                             module: &shader,
-                            entry_point: "fragment",
+                            entry_point: "main",
                             compilation_options: Default::default(),
                             targets: &[Some(wgpu::ColorTargetState {
                                 format: surface_format,
@@ -590,6 +594,7 @@ impl<'a> ApplicationHandler for AppState<'a> {
                             })],
                         }),
                         multiview: None,
+                        cache: None,
                     });
                 let mouse_capture_mode = CursorGrabMode::None;
                 let cursor_is_visible = true;
