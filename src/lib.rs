@@ -272,7 +272,7 @@ impl<'a> App<'a> {
                     self.camera_controller
                         .process_mouse_motion(&mut self.camera, delta);
                 }
-            },
+            }
             _ => {}
         }
     }
@@ -380,52 +380,72 @@ impl<'a> ApplicationHandler for AppState<'a> {
 
                 surface.configure(&device, &surface_config); // causes segfault if device, surface_config die.
 
-                // let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    // label: Some("shader"),
-                    // source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
-                // });
                 let shader = device.create_shader_module(include_spirv!("simple.spv"));
 
                 let screen_bind_group_layout =
                     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                         label: Some("bind_group_layout"),
-                        entries: &[wgpu::BindGroupLayoutEntry {
-                            binding: 0,
-                            visibility: wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Storage { read_only: false },
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
+                        entries: &[
+                            wgpu::BindGroupLayoutEntry {
+                                binding: 0,
+                                visibility: wgpu::ShaderStages::COMPUTE
+                                    | wgpu::ShaderStages::FRAGMENT,
+                                ty: wgpu::BindingType::Buffer {
+                                    ty: wgpu::BufferBindingType::Uniform,
+                                    has_dynamic_offset: false,
+                                    min_binding_size: None,
+                                },
+                                count: None,
                             },
-                            count: None,
-                        }],
+                            wgpu::BindGroupLayoutEntry {
+                                binding: 1,
+                                visibility: wgpu::ShaderStages::COMPUTE
+                                    | wgpu::ShaderStages::FRAGMENT,
+                                ty: wgpu::BindingType::Buffer {
+                                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                                    has_dynamic_offset: false,
+                                    min_binding_size: None,
+                                },
+                                count: None,
+                            },
+                        ],
+                    });
+
+                let screen_size_uniform =
+                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: None,
+                        contents: bytemuck::bytes_of(&[size.width, size.height]),
+                        usage: wgpu::BufferUsages::UNIFORM,
                     });
 
                 let screen_buffer = device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("screen_buffer"),
-                    size: (1920 * 1080 + 1) * 16, // TODO: less magic
+                    size: (1920 * 1080) * 16, // TODO: less magic
                     usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: true,
+                    mapped_at_creation: false,
                 });
-
-                {
-                    // TODO: less magic
-                    let mut lol = screen_buffer.slice(0..8).get_mapped_range_mut();
-                    lol.copy_from_slice(bytemuck::bytes_of(&[size.width, size.height]));
-                }
-                screen_buffer.unmap();
 
                 let screen_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("screen_bind_group"),
                     layout: &screen_bind_group_layout,
-                    entries: &[wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                            buffer: &screen_buffer,
-                            offset: 0,
-                            size: None,
-                        }),
-                    }],
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                buffer: &screen_size_uniform,
+                                offset: 0,
+                                size: None,
+                            }),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                buffer: &screen_buffer,
+                                offset: 0,
+                                size: None,
+                            }),
+                        },
+                    ],
                 });
 
                 let bind_group_1_layout =
@@ -553,8 +573,7 @@ impl<'a> ApplicationHandler for AppState<'a> {
                 let render_pipeline_layout =
                     device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                         label: Some("render_pipeline_layout"),
-                        // bind_group_layouts: &[&screen_bind_group_layout],
-                        bind_group_layouts: &[],
+                        bind_group_layouts: &[&screen_bind_group_layout],
                         push_constant_ranges: &[],
                     });
 

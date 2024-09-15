@@ -1,5 +1,7 @@
 struct Screen {
-    float2 screenSize;
+    [[vk::binding(0, 0)]]
+    uint2 screenSize;
+    [[vk::binding(1, 0)]]
     RWStructuredBuffer<float4> screenArray;
 }
 
@@ -10,14 +12,13 @@ struct Camera {
     float yfov;
 }
 
-// [[vk::binding(0, 0)]]
-// Screen screen;
+// Naga screams at me when I try to put an array into Screen and have an RWStructuredBuffer<Screen> at top level
+// for mutability. Not sure why it gets upset. We either have to do this or turn the screen parameters into
+// globals.
+ParameterBlock<Screen> screen;
 
-// [[vk::binding(1,0)]]
-// uniform Camera camera;
-
-[shader("compute")][numthreads(16,16,1)]
-void soscompute() {
+[shader("compute")] [numthreads(16, 16, 1)]
+void compute() {
 
 }
 
@@ -33,5 +34,6 @@ float4 vertex(uint ix : SV_VertexID) : SV_Position {
 
 [shader("fragment")]
 float4 fragment(float4 in : SV_Position): SV_Target {
-    return float4(1.0, 0.0, 0.0, 0.0);
+    var sos : float2 = float2(screen.screenSize);
+    return float4(sos, screen.screenArray[0].xy);
 }
