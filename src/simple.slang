@@ -2,7 +2,7 @@ struct Screen {
     [[vk::binding(0, 0)]]
     uint2 screenSize;
     [[vk::binding(1, 0)]]
-    RWStructuredBuffer<float4> screenArray;
+    [vk::image_format("rgba16f")]RWTexture2D screenTexture;
 }
 
 struct Camera {
@@ -19,7 +19,7 @@ ParameterBlock<Screen> screen;
 
 [shader("compute")] [numthreads(16, 16, 1)]
 void compute() {
-
+    float3x3 q;
 }
 
 [shader("vertex")]
@@ -35,5 +35,5 @@ float4 vertex(uint ix : SV_VertexID) : SV_Position {
 [shader("fragment")]
 float4 fragment(float4 in : SV_Position): SV_Target {
     var sos : float2 = float2(screen.screenSize);
-    return float4(sos, screen.screenArray[0].xy);
+    return float4(sos, screen.screenTexture[int2(0,0)].xy);
 }

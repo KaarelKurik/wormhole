@@ -370,7 +370,7 @@ impl<'a> ApplicationHandler for AppState<'a> {
                 let device_future = adapter.request_device(
                     &wgpu::DeviceDescriptor {
                         label: Some("device"),
-                        required_features: wgpu::Features::empty(),
+                        required_features: wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
                         required_limits: wgpu::Limits::default(),
                         memory_hints: wgpu::MemoryHints::default(),
                     },
@@ -382,6 +382,8 @@ impl<'a> ApplicationHandler for AppState<'a> {
 
                 let shader = device.create_shader_module(include_spirv!("simple.spv"));
 
+                // TODO: think about whether we could redo the binding with reflection.
+                let screen_texture_format = wgpu::TextureFormat::Rgba16Float;
                 let screen_bind_group_layout =
                     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                         label: Some("bind_group_layout"),
@@ -401,10 +403,10 @@ impl<'a> ApplicationHandler for AppState<'a> {
                                 binding: 1,
                                 visibility: wgpu::ShaderStages::COMPUTE
                                     | wgpu::ShaderStages::FRAGMENT,
-                                ty: wgpu::BindingType::Buffer {
-                                    ty: wgpu::BufferBindingType::Storage { read_only: false },
-                                    has_dynamic_offset: false,
-                                    min_binding_size: None,
+                                ty: wgpu::BindingType::StorageTexture {
+                                    access: wgpu::StorageTextureAccess::ReadWrite,
+                                    format: screen_texture_format,
+                                    view_dimension: wgpu::TextureViewDimension::D2,
                                 },
                                 count: None,
                             },
@@ -417,13 +419,32 @@ impl<'a> ApplicationHandler for AppState<'a> {
                         contents: bytemuck::bytes_of(&[size.width, size.height]),
                         usage: wgpu::BufferUsages::UNIFORM,
                     });
+                let screen_width = 1920u32;
+                let screen_height = 1080u32;
 
                 let screen_buffer = device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("screen_buffer"),
-                    size: (1920 * 1080) * 16, // TODO: less magic
+                    size: (u64::from(screen_width) * u64::from(screen_height)) * 16, // TODO: less magic
                     usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 });
+
+                let screen_texture = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("screen"),
+                    size: wgpu::Extent3d {
+                        width: screen_width,
+                        height: screen_height,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: screen_texture_format,
+                    usage: wgpu::TextureUsages::STORAGE_BINDING,
+                    view_formats: &[screen_texture_format],
+                });
+                let screen_texture_view =
+                    screen_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
                 let screen_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("screen_bind_group"),
@@ -439,11 +460,7 @@ impl<'a> ApplicationHandler for AppState<'a> {
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,
-                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                                buffer: &screen_buffer,
-                                offset: 0,
-                                size: None,
-                            }),
+                            resource: wgpu::BindingResource::TextureView(&screen_texture_view),
                         },
                     ],
                 });
