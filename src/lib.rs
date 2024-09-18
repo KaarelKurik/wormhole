@@ -151,6 +151,8 @@ struct App<'a> {
     screen_buffer: wgpu::Buffer,
     screen_bind_group: wgpu::BindGroup,
     bind_group_1: wgpu::BindGroup,
+    camera_bind_group: wgpu::BindGroup,
+    screen_size_uniform: wgpu::Buffer,
     camera: Camera,
     camera_controller: CameraController,
     camera_uniform: UniformBuffer<Vec<u8>>,
@@ -207,6 +209,7 @@ impl<'a> App<'a> {
             });
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(0, &self.screen_bind_group, &[]);
+            render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
             render_pass.draw(0..3, 0..1);
         }
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -220,7 +223,7 @@ impl<'a> App<'a> {
             self.surface_config.height = new_size.height;
             self.surface.configure(&self.device, &self.surface_config);
             self.queue.write_buffer(
-                &self.screen_buffer,
+                &self.screen_size_uniform,
                 0,
                 bytemuck::bytes_of(&[self.size.width, self.size.height]),
             ); // TODO: less magic
@@ -417,7 +420,7 @@ impl<'a> ApplicationHandler for AppState<'a> {
                     device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                         label: None,
                         contents: bytemuck::bytes_of(&[size.width, size.height]),
-                        usage: wgpu::BufferUsages::UNIFORM,
+                        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                     });
                 let screen_width = 1920u32;
                 let screen_height = 1080u32;
@@ -570,6 +573,30 @@ impl<'a> ApplicationHandler for AppState<'a> {
                     ],
                 });
 
+                let camera_bind_group_layout =
+                    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                        label: None,
+                        entries: &[wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::all(),
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        }],
+                    });
+
+                let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("camera_bind_group"),
+                    layout: &camera_bind_group_layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: camera_buffer.as_entire_binding(),
+                    }],
+                });
+
                 let compute_pipeline_layout =
                     device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                         label: Some("compute_pipeline_layout"),
@@ -590,7 +617,7 @@ impl<'a> ApplicationHandler for AppState<'a> {
                 let render_pipeline_layout =
                     device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                         label: Some("render_pipeline_layout"),
-                        bind_group_layouts: &[&screen_bind_group_layout],
+                        bind_group_layouts: &[&screen_bind_group_layout, &camera_bind_group_layout],
                         push_constant_ranges: &[],
                     });
 
@@ -647,6 +674,8 @@ impl<'a> ApplicationHandler for AppState<'a> {
                     screen_bind_group,
                     screen_buffer,
                     bind_group_1,
+                    camera_bind_group,
+                    screen_size_uniform,
                     camera,
                     camera_controller,
                     camera_buffer,
