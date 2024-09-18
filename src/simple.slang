@@ -154,11 +154,14 @@ struct EllisDonut
     // }
 }
 
+// We can't put these in the struct, since they'd have to be static,
+// and that causes the compiler to segfault (and I believe it's semantically
+// wrong too)
 [ForwardDifferentiable]
 [Differentiable]
 float3x3 ellis_donut_im(EllisDonut donut, float3 tc)
 {
-    let br = donut.radius + cos(tc.y);
+    let br = donut.radius + cos(tc.z);
     return {
         { 1., 0., 0. },
         { 0., 1. / (br * br), 0. },
@@ -168,7 +171,7 @@ float3x3 ellis_donut_im(EllisDonut donut, float3 tc)
 [ForwardDifferentiable]
 float3x3 ellis_donut_m(EllisDonut donut, float3 tc)
 {
-    let br = donut.radius + cos(tc.y);
+    let br = donut.radius + cos(tc.z);
     return {
         { 1., 0., 0. },
         { 0., br * br, 0. },
