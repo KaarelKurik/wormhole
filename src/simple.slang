@@ -31,6 +31,22 @@ ParameterBlock<Screen> screen;
 [[vk::binding(0, 1)]]
 ParameterBlock<Camera> camera;
 
+static Camera test_cam = {
+    // x should be aligned with unit phi, y with -unit psi, z with -r
+    // *and* the frame should be orthogonal
+    { { 0.0, 0., -1. },
+      { 1.0, 0., 0. },
+      { 0.0, -1., 0. } },
+    {-3.0, 0., 0.6},
+    0,
+    1.5
+};
+
+static EllisDonut test_donut = {
+    1.0,
+    0.1
+};
+
 [shader("compute")]
 [numthreads(16, 16, 1)]
 void compute()
@@ -64,7 +80,7 @@ float3x3 tensor_square(float3 cv)
 [Differentiable]
 float3 toroidal_to_cartesian(no_diff float radius, float3 tc)
 {
-    let br = (radius + tc.x * cos(tc.z));
+    let br = torus_xy_radius(radius, tc);
     return float3(br * cos(tc.y), br * sin(tc.y), tc.x * sin(tc.z));
 }
 
@@ -154,6 +170,12 @@ struct EllisDonut
     // }
 }
 
+[ForwardDifferentiable]
+[Differentiable]
+float torus_xy_radius(float major_radius, float3 tc) {
+    return major_radius + tc.x * cos(tc.z);
+}
+
 // We can't put these in the struct, since they'd have to be static,
 // and that causes the compiler to segfault (and I believe it's semantically
 // wrong too)
@@ -161,21 +183,21 @@ struct EllisDonut
 [Differentiable]
 float3x3 ellis_donut_im(EllisDonut donut, float3 tc)
 {
-    let br = donut.radius + cos(tc.z);
+    let br = torus_xy_radius(donut.radius, tc);
     return {
         { 1., 0., 0. },
         { 0., 1. / (br * br), 0. },
-        { 0., 0., 1. / (donut.radius * donut.radius + donut.wedge * donut.wedge) }
+        { 0., 0., 1. / (tc.x * tc.x + donut.wedge * donut.wedge) }
     };
 }
 [ForwardDifferentiable]
 float3x3 ellis_donut_m(EllisDonut donut, float3 tc)
 {
-    let br = donut.radius + cos(tc.z);
+    let br = torus_xy_radius(donut.radius, tc);
     return {
         { 1., 0., 0. },
         { 0., br * br, 0. },
-        { 0., 0., donut.radius * donut.radius + donut.wedge * donut.wedge }
+        { 0., 0., tc.x * tc.x + donut.wedge * donut.wedge }
     };
 }
 
@@ -221,6 +243,18 @@ TR3 pixel_to_camera_ray(uint2 pixel_coords)
     return TR3(camera.ambient_index, camera.centre, normalize(unnormed_ray));
 }
 
+TR3 pixel_to_ellis_ray(uint2 pixel_coords)
+{
+    let center_metric = ellis_donut_m(test_donut, test_cam.centre);
+    let screen_bounds = float2(screen.screenSize);
+    let coords = float2(pixel_coords) - (screen_bounds - 1.0) / 2.;
+    let sq_norms = mul(transpose(test_cam.frame), mul(center_metric, test_cam.frame));
+    let frame_scale = (2. / screen_bounds.y) * tan(test_cam.yfov / 2.) * sqrt(sq_norms[2][2] / sq_norms[1][1]);
+    let unnormed_ray = mul(test_cam.frame, float3(coords, 1. / frame_scale));
+    let ray_norm = sqrt(dot(unnormed_ray, mul(center_metric, unnormed_ray)));
+    return TR3(test_cam.ambient_index, test_cam.centre, unnormed_ray / ray_norm);
+}
+
 [shader("vertex")]
 float4 vertex(uint ix: SV_VertexID)
     : SV_Position
@@ -238,7 +272,15 @@ float4 fragment(float4 in: SV_Position)
     : SV_Target
 {
     let pixel = uint2(in.xy);
-    let ray = pixel_to_camera_ray(pixel);
-    let intensity = proj_ray_to_sphere_grid(ray.v);
-    return float4(float3(intensity), 1.0);
+    // let ray = pixel_to_camera_ray(pixel);
+    let ray = pixel_to_ellis_ray(pixel);
+    let dt = 0.001;
+    let n = 6400;
+    var q = ray.q;
+    var v = ray.v;
+    test_donut.velocity_verlet(q, v, dt, n);
+    let qv = fwd_diff(toroidal_to_cartesian)(test_donut.radius, diffPair(q, v));
+    let intensity = proj_ray_to_sphere_grid(qv.d);
+    let crop: float2 = q.x > 0 ? float2(intensity, 0.) : float2(0., intensity);
+    return float4(crop, abs(q.x) < 0.02 ? 1.0 : 0., 1.0);
 }
