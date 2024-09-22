@@ -1,12 +1,10 @@
+use autodiff::{Float, FT};
 use cgmath::{
     Array, InnerSpace, Matrix, Matrix3, Matrix4, Rad, SquareMatrix, Vector2, Vector3, Zero,
 };
 use encase::{ArrayLength, ShaderType, StorageBuffer, UniformBuffer};
 use std::{
-    f32::consts::PI,
-    path::Ancestors,
-    sync::Arc,
-    time::{Duration, Instant},
+    default, f32::consts::PI, path::Ancestors, sync::Arc, time::{Duration, Instant}
 };
 
 use wgpu::{include_spirv, util::DeviceExt};
@@ -27,6 +25,96 @@ struct CameraController {
     s_state: ElementState,
     a_state: ElementState,
     d_state: ElementState,
+}
+
+struct EllisDonut {
+    radius: f32,
+    wedge: f32,
+}
+
+fn shuffle(x: FT<Vector3<f32>>) -> Vector3<FT<f32>> {
+    x.x.zip(x.dx, |u, v| FT::new(u, v))
+}
+
+fn map_matrix<T, W, F>(m: Matrix3<T>, mut f: F) -> Matrix3<W>
+where
+    F: FnMut(T) -> W,
+{
+    Matrix3 {
+        x: m.x.map(&mut f),
+        y: m.y.map(&mut f),
+        z: m.z.map(&mut f),
+    }
+}
+
+impl EllisDonut {
+    fn torus_xy_radius(&self, tc: Vector3<FT<f32>>) -> FT<f32> {
+        FT::<f32>::cst(self.radius) + tc.x * tc.z.cos()
+    }
+    fn ellis_donut_m(&self, tc: Vector3<FT<f32>>) -> Matrix3<FT<f32>> {
+        let br = self.torus_xy_radius(tc);
+        let cwedge: FT<f32> = FT::cst(self.wedge);
+
+        Matrix3::<FT<f32>>::from_diagonal(Vector3::new(
+            FT::cst(1f32),
+            br * br,
+            tc.x * tc.x + cwedge * cwedge,
+        ))
+    }
+    fn ellis_donut_im(&self, tc: Vector3<FT<f32>>) -> Matrix3<FT<f32>> {
+        let cone: FT<f32> = FT::cst(1f32);
+        Matrix3::from_diagonal(self.ellis_donut_m(tc).diagonal().map(|x| cone/x))
+    }
+    fn christoffel(&self, tc: Vector3<f32>) -> [Matrix3<f32>; 3] {
+        let tc0 = Vector3::new(FT::var(tc.x), FT::cst(tc.y), FT::cst(tc.z));
+        let tc1 = Vector3::new(FT::cst(tc.x), FT::var(tc.y), FT::cst(tc.z));
+        let tc2 = Vector3::new(FT::cst(tc.x), FT::cst(tc.y), FT::var(tc.z));
+
+        let m0 = self.ellis_donut_m(tc0);
+        let m1 = self.ellis_donut_m(tc1);
+        let m2 = self.ellis_donut_m(tc2);
+        let f = |x: FT<f32>| x.dx;
+        let m: [Matrix3<f32>; 3] = [map_matrix(m0, f), map_matrix(m1, f), map_matrix(m2, f)];
+        let im = map_matrix(self.ellis_donut_im(tc.map(|x| FT::cst(x))), |x| x.x);
+        let mut out: [Matrix3<f32>; 3] = [Matrix3::from_scale(0f32); 3];
+        for k in 0..3 {
+            for i in 0..3 {
+                for j in 0..3 {
+                    for t in 0..3 {
+                        out[k][i][j] += 0.5 * im[k][t] * (m[j][i][t] + m[i][j][t] - m[t][i][j]);
+                    }
+                }
+            }
+        }
+        out
+    }
+    // We're just going to assume the christoffel symbol is symmetric
+    fn parallel_transport_velocity(&self, q: Vector3<f32>, v: Vector3<f32>, t: Vector3<f32>) -> Vector3<f32> {
+        let cs = self.christoffel(q);
+        let mut out = Vector3::zero();
+        for k in 0..3 {
+            out[k] = -t.dot(cs[k]*v);
+        }
+        out
+    }
+    fn acceleration(&self, q: Vector3<f32>, v: Vector3<f32>) -> Vector3<f32> {
+        self.parallel_transport_velocity(q, v, v)
+    }
+    fn velocity_verlet_step(&self, q: &mut Vector3<f32>, v: &mut Vector3<f32>, dt: f32) {
+        let dvdt = self.acceleration(*q, *v);
+        let vh = *v + 0.5 * dvdt * dt;
+        let qf = *q + vh * dt;
+        let vf_approx = *v + dvdt * dt;
+        let dvdtf_approx = self.acceleration(qf, vf_approx);
+        let vf = vh + 0.5 * dvdtf_approx * dt;
+        *q = qf;
+        *v = vf;
+    }
+    fn velocity_verlet(&self, q: &mut Vector3<f32>, v: &mut Vector3<f32>, dt: f32, n: u64) {
+        for k in 0..n {
+            self.velocity_verlet_step(q, v, dt);
+        }
+    }
 }
 
 impl CameraController {
