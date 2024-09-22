@@ -42,11 +42,19 @@ static Camera badtest_cam = {
     1.5
 };
 
+// For cartesian use.
+float3x3 make_camera_frame(float3 fwd, float3 up) {
+    let z = normalize(fwd);
+    let y = -(up - dot(z, up) * z);
+    let x = cross(y, z);
+    return transpose( float3x3(x,y,z));
+}
+
 static Camera test_cam = {
-    { { 0.0, 0., 1. },
-      { 0.0, 1., 0. },
+    { { 0.0, 0., -1. },
+      { 0.0, 1., -1. },
       { 1.0, 0., 0. } },
-    { 0.5, 0.0, 0.0 },
+    { 0.6, -0.3, 0.0 },
     0,
     1.5
 };
@@ -380,16 +388,16 @@ float3x3 normalize_orthogonal_frame(float3x3 metric, float3x3 frame)
 
 // The bugs I've been running into reveal the necessity of a type distinction
 // between vectors and covectors, like with metrics and inverse metrics.
-TR3 pixel_to_ellis_ray(Camera test_cam, uint2 pixel_coords)
+TR3 pixel_to_ellis_ray(Camera cam, uint2 pixel_coords)
 {
-    let center_metric = toroidal_m(test_donut, test_cam.centre);
-    let normed_frame = normalize_orthogonal_frame(center_metric, test_cam.frame);
+    let center_metric = toroidal_m(test_donut, cam.centre);
+    let normed_frame = normalize_orthogonal_frame(center_metric, cam.frame);
     let screen_bounds = float2(screen.screenSize);
     let coords = float2(pixel_coords) - (screen_bounds - 1.0) / 2.;
-    let frame_scale = (2. / screen_bounds.y) * tan(test_cam.yfov / 2.);
+    let frame_scale = (2. / screen_bounds.y) * tan(cam.yfov / 2.);
     let unnormed_ray = mul(normed_frame, float3(coords, 1. / frame_scale));
     let ray_norm = sqrt(dot(unnormed_ray, mul(center_metric, unnormed_ray)));
-    return TR3(test_cam.ambient_index, test_cam.centre, unnormed_ray / ray_norm);
+    return TR3(cam.ambient_index, cam.centre, unnormed_ray / ray_norm);
 }
 
 [shader("vertex")]
