@@ -46,7 +46,7 @@ static Camera test_cam = {
     { { 0.0, 0., 1. },
       { 0.0, 1., 0. },
       { 1.0, 0., 0. } },
-    { 0.5, PI, 0.0 },
+    { 0.5, 0.0, 0.0 },
     0,
     1.5
 };
@@ -55,7 +55,7 @@ static float PI = radians(180);
 
 static EllisDonut test_donut = {
     1.0,
-    0.0
+    0.1
 };
 
 [shader("compute")]
@@ -140,28 +140,28 @@ float3 toroidal_angle_quotient(float3 tc)
 
 [ForwardDifferentiable]
 [Differentiable]
-// float3 toroidal_to_cartesian(no_diff float radius, float3 tc)
-// {
-//     let br = torus_xy_radius(radius, tc);
-//     let z = radius * (tc.x * sin(tc.y)) / biased_common_bipolar_factor(tc);
-//     return float3(br * cos(tc.z), br * sin(tc.z), z);
-// }
 float3 toroidal_to_cartesian(no_diff float radius, float3 tc)
 {
-    let common = (sinh(log(tc.x)) / (cosh(log(tc.x)) - cos(tc.y)));
-    let x = radius * common * cos(tc.z);
-    let y = radius * common * sin(tc.z);
-    let z = radius * sin(tc.y) / (cosh(log(tc.x)) - cos(tc.y));
-    return float3(x, y, z);
+    let br = torus_xy_radius(radius, tc);
+    let z = radius * (tc.x * sin(tc.y)) / biased_common_bipolar_factor(tc);
+    return float3(br * cos(tc.z), br * sin(tc.z), z);
 }
+// float3 toroidal_to_cartesian(no_diff float radius, float3 tc)
+// {
+//     let common = (sinh(log(tc.x)) / (cosh(log(tc.x)) - cos(tc.y)));
+//     let x = radius * common * cos(tc.z);
+//     let y = radius * common * sin(tc.z);
+//     let z = radius * sin(tc.y) / (cosh(log(tc.x)) - cos(tc.y));
+//     return float3(x, y, z);
+// }
 
 // Not sure this autodiffs correctly. Maybe we should
 // be careful about it.
 void invert_diagonal(inout float3x3 diag_matrix)
 {
-    diag_matrix._11 = 1. / diag_matrix._11;
-    diag_matrix._22 = 1. / diag_matrix._22;
-    diag_matrix._33 = 1. / diag_matrix._33;
+    diag_matrix[0][0] = 1. / diag_matrix[0][0];
+    diag_matrix[1][1] = 1. / diag_matrix[1][1];
+    diag_matrix[2][2] = 1. / diag_matrix[2][2];
 }
 
 // We can't put these in the struct, since they'd have to be static,
@@ -195,7 +195,9 @@ float3x3 toroidal_m(EllisDonut donut, float3 tc)
     bwd_diff(toroidal_to_cartesian)(donut.radius, dx_pullback, { 1., 0., 0. });
     bwd_diff(toroidal_to_cartesian)(donut.radius, dy_pullback, { 0., 1., 0. });
     bwd_diff(toroidal_to_cartesian)(donut.radius, dz_pullback, { 0., 0., 1. });
-    return tensor_square(dx_pullback.d) + tensor_square(dy_pullback.d) + tensor_square(dz_pullback.d);
+    var outm = tensor_square(dx_pullback.d) + tensor_square(dy_pullback.d) + tensor_square(dz_pullback.d);
+    outm[1][1] += donut.wedge * donut.wedge;
+    return outm;
 }
 
 // I should've just used a pullback to get this but I already did the
@@ -410,7 +412,7 @@ float4 fragment(float4 in: SV_Position)
     // let ray = pixel_to_camera_ray(pixel);
     let ray = pixel_to_ellis_ray(test_cam, pixel);
     let dt = 0.01;
-    let n = 300;
+    let n = 600;
     var q = ray.q;
     var v = ray.v;
     test_donut.velocity_verlet(q, v, dt, n);
