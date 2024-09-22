@@ -193,38 +193,38 @@ float3x3 badtoroidal_im(EllisDonut donut, float3 tc)
     return o;
 }
 
-[ForwardDifferentiable]
-float3x3 toroidal_m(EllisDonut donut, float3 tc)
-{
-    var dx_pullback = diffPair(tc);
-    var dy_pullback = diffPair(tc);
-    var dz_pullback = diffPair(tc);
+// [ForwardDifferentiable]
+// float3x3 toroidal_m(EllisDonut donut, float3 tc)
+// {
+//     var dx_pullback = diffPair(tc);
+//     var dy_pullback = diffPair(tc);
+//     var dz_pullback = diffPair(tc);
 
-    bwd_diff(toroidal_to_cartesian)(donut.radius, dx_pullback, { 1., 0., 0. });
-    bwd_diff(toroidal_to_cartesian)(donut.radius, dy_pullback, { 0., 1., 0. });
-    bwd_diff(toroidal_to_cartesian)(donut.radius, dz_pullback, { 0., 0., 1. });
-    var outm = tensor_square(dx_pullback.d) + tensor_square(dy_pullback.d) + tensor_square(dz_pullback.d);
-    outm[1][1] += donut.wedge * donut.wedge;
-    return outm;
-}
+//     bwd_diff(toroidal_to_cartesian)(donut.radius, dx_pullback, { 1., 0., 0. });
+//     bwd_diff(toroidal_to_cartesian)(donut.radius, dy_pullback, { 0., 1., 0. });
+//     bwd_diff(toroidal_to_cartesian)(donut.radius, dz_pullback, { 0., 0., 1. });
+//     var outm = tensor_square(dx_pullback.d) + tensor_square(dy_pullback.d) + tensor_square(dz_pullback.d);
+//     outm[1][1] += donut.wedge * donut.wedge;
+//     return outm;
+// }
 
 // I should've just used a pullback to get this but I already did the
 // calculation by hand, so I might as well use it.
-// [ForwardDifferentiable]
-// float3x3 toroidal_m(EllisDonut donut, float3 tc) {
-//     let bcf = biased_common_bipolar_factor(tc);
-//     let bcf_sqinv = 1. / (bcf * bcf);
-//     // let upper_biased = (0.5 * (tc.x * tc.x - 1));
-//     // let ub_sq = upper_biased * upper_biased;
-//     // let xy_radius_sq = ub_sq * bcf_sqinv; // same as torus_xy_radius(1., tc) squared
-//     let xy_radius_sq = torus_xy_radius(1., tc) * torus_xy_radius(1., tc);
-//     let unscaled_out : float3x3 = {
-//         { bcf_sqinv, 0., 0. },
-//         { 0., (tc.x * tc.x) * bcf_sqinv + donut.wedge * donut.wedge, 0. },
-//         { 0., 0., xy_radius_sq}
-//     };
-//     return donut.radius * unscaled_out;
-// }
+[ForwardDifferentiable]
+float3x3 toroidal_m(EllisDonut donut, float3 tc) {
+    let bcf = biased_common_bipolar_factor(tc);
+    let bcf_sqinv = 1. / (bcf * bcf);
+    // let upper_biased = (0.5 * (tc.x * tc.x - 1));
+    // let ub_sq = upper_biased * upper_biased;
+    // let xy_radius_sq = ub_sq * bcf_sqinv; // same as torus_xy_radius(1., tc) squared
+    let xy_radius_sq = torus_xy_radius(1., tc) * torus_xy_radius(1., tc);
+    let unscaled_out : float3x3 = {
+        { bcf_sqinv, 0., 0. },
+        { 0., (tc.x * tc.x) * bcf_sqinv + donut.wedge * donut.wedge, 0. },
+        { 0., 0., xy_radius_sq}
+    };
+    return donut.radius * unscaled_out;
+}
 
 float3x3 simple_invert_diagonal(float3x3 im)
 {
