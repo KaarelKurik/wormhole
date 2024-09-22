@@ -130,7 +130,7 @@ float3 badtoroidal_to_cartesian(no_diff float radius, float3 tc)
 [ForwardDifferentiable]
 float3 toroidal_ratio_quotient(float3 tc)
 {
-    return { 1. / tc.x, -tc.y, (tc.z + PI) };
+    return { 1. / tc.x, tc.y, (tc.z + PI) };
 }
 
 float3 toroidal_angle_quotient(float3 tc)
