@@ -31,20 +31,31 @@ ParameterBlock<Screen> screen;
 [[vk::binding(0, 1)]]
 ParameterBlock<Camera> camera;
 
-static Camera test_cam = {
+static Camera badtest_cam = {
     // x should be aligned with unit phi, y with -unit psi, z with -r
     // *and* the frame should be orthogonal
     { { 0.0, 0., -1. },
       { 1.0, 0., 0. },
       { 0.0, -1., 0. } },
-    {-3.0, 0., 0.6},
+    {2.0, 0.0, 0.6},
     0,
     1.5
 };
 
+static Camera test_cam = {
+    { { 0.0, 0., 1. },
+      { 0.0, 1., 0. },
+      { 1.0, 0., 0. } },
+    { 0.8, 0.0, 0.0 },
+    0,
+    1.5
+};
+
+static float PI = radians(180);
+
 static EllisDonut test_donut = {
     1.0,
-    0.1
+    0.0
 };
 
 [shader("compute")]
@@ -76,12 +87,105 @@ float3x3 tensor_square(float3 cv)
     return mul(inject(cv), matrix<float, 1, 3>(cv));
 }
 
+void ellis_take_modulo(inout float3 tc) {
+    tc.y %= 2 * PI;
+    tc.z %= 2 * PI;
+}
+
+[ForwardDifferentiable]
+float biased_common_bipolar_factor(float3 tc) {
+    return 0.5 * (tc.x * tc.x + 1) - tc.x * cos(tc.y);
+}
+
+[ForwardDifferentiable]
+float badtorus_xy_radius(float major_radius, float3 tc) {
+    return major_radius + tc.x * cos(tc.z);
+}
+
+[ForwardDifferentiable]
+float torus_xy_radius(float major_radius, float3 tc) {
+    // tc order is (r, sigma, phi)
+    // we assume abs(r) < 1 for sign correctness
+    return -0.5 * major_radius * (tc.x * tc.x - 1) / biased_common_bipolar_factor(tc);
+}
+
 // Order is r, phi (around z axis), psi
-[Differentiable]
+[ForwardDifferentiable]
+float3 badtoroidal_to_cartesian(no_diff float radius, float3 tc)
+{
+    let br = badtorus_xy_radius(radius, tc);
+    return float3(br * cos(tc.y), br * sin(tc.y), tc.x * sin(tc.z));
+}
+
+[ForwardDifferentiable]
+float3 toroidal_ratio_quotient(float3 tc) {
+    return { 1. / tc.x, -tc.y, (tc.z + PI) };
+}
+
+float3 toroidal_angle_quotient(float3 tc) {
+    return { tc.x, tc.y % (2 * PI), tc.z % (2 * PI) };
+}
+
+[ForwardDifferentiable]
 float3 toroidal_to_cartesian(no_diff float radius, float3 tc)
 {
     let br = torus_xy_radius(radius, tc);
-    return float3(br * cos(tc.y), br * sin(tc.y), tc.x * sin(tc.z));
+    let z = radius * (tc.x * sin(tc.y)) / biased_common_bipolar_factor(tc);
+    return float3(br * cos(tc.z), br * sin(tc.z), z);
+}
+
+// Not sure this autodiffs correctly. Maybe we should
+// be careful about it.
+void invert_diagonal(inout float3x3 diag_matrix) {
+    diag_matrix._11 = 1. / diag_matrix._11;
+    diag_matrix._22 = 1. / diag_matrix._22;
+    diag_matrix._33 = 1. / diag_matrix._33;
+}
+
+// We can't put these in the struct, since they'd have to be static,
+// and that causes the compiler to segfault (and I believe it's semantically
+// wrong too)
+[ForwardDifferentiable]
+float3x3 badtoroidal_m(EllisDonut donut, float3 tc)
+{
+    let br = badtorus_xy_radius(donut.radius, tc);
+    return {
+        { 1., 0., 0. },
+        { 0., br * br, 0. },
+        { 0., 0., tc.x * tc.x + donut.wedge * donut.wedge }
+    };
+}
+[ForwardDifferentiable]
+float3x3 badtoroidal_im(EllisDonut donut, float3 tc)
+{
+    var o = badtoroidal_m(donut, tc);
+    invert_diagonal(o);
+    return o;
+}
+
+// I should've just used a pullback to get this but I already did the
+// calculation by hand, so I might as well use it.
+[ForwardDifferentiable]
+float3x3 toroidal_m(EllisDonut donut, float3 tc) {
+    let bcf = biased_common_bipolar_factor(tc);
+    let bcf_sqinv = 1. / (bcf * bcf);
+    let upper_biased = (0.5 * (tc.x * tc.x - 1));
+    let ub_sq = upper_biased * upper_biased;
+    let xy_radius = ub_sq * bcf; // same as torus_xy_radius(1., tc)
+    let unscaled_out : float3x3 = {
+        { bcf_sqinv, 0., 0. },
+        { 0., (tc.x * tc.x) * bcf_sqinv + donut.wedge * donut.wedge, 0. },
+        { 0., 0., xy_radius}
+    };
+    return donut.radius * unscaled_out;
+}
+
+
+
+float3x3 toroidal_im(EllisDonut donut, float3 tc) {
+    var o = toroidal_m(donut, tc);
+    invert_diagonal(o);
+    return o;
 }
 
 struct EllisDonut
@@ -91,11 +195,11 @@ struct EllisDonut
 
     float3x3[3] christoffel(float3 tc)
     {
-        let m0 = fwd_diff(ellis_donut_m)(this, diffPair(tc, { 1., 0., 0. }));
-        let m1 = fwd_diff(ellis_donut_m)(this, diffPair(tc, { 0., 1., 0. }));
-        let m2 = fwd_diff(ellis_donut_m)(this, diffPair(tc, { 0., 0., 1. }));
+        let m0 = fwd_diff(toroidal_m)(this, diffPair(tc, { 1., 0., 0. }));
+        let m1 = fwd_diff(toroidal_m)(this, diffPair(tc, { 0., 1., 0. }));
+        let m2 = fwd_diff(toroidal_m)(this, diffPair(tc, { 0., 0., 1. }));
         let m : float3x3[3] = { m0.d, m1.d, m2.d };
-        let im = ellis_donut_im(this, tc);
+        let im = toroidal_im(this, tc);
         var out : float3x3[3] = {};
         for (int k = 0; k < 3; ++k)
         {
@@ -126,12 +230,12 @@ struct EllisDonut
 
     // [Differentiable]
     // static float hamiltonian(float3 q, float3 p) {
-    //     return 0.5 * dot(p, mul(ellis_donut_im(this, q), p));
+    //     return 0.5 * dot(p, mul(badtoroidal_im(this, q), p));
     // }
 
     float3 velocity(float3 q, float3 p)
     {
-        return mul(p, ellis_donut_im(this, q));
+        return mul(p, toroidal_im(this, q));
     }
 
     // float3 dpdt(float3 q, float3 p) {
@@ -157,6 +261,11 @@ struct EllisDonut
         for (uint k = 0; k < n; ++k)
         {
             velocity_verlet(q, v, dt);
+            if (abs(q.x) > 1.5) {
+                // let change = fwd_diff(toroidal_ratio_quotient)(diffPair(q, v));
+                // q = change.v;
+                // v = change.d;
+            }
         }
     }
 
@@ -170,36 +279,6 @@ struct EllisDonut
     // }
 }
 
-[ForwardDifferentiable]
-[Differentiable]
-float torus_xy_radius(float major_radius, float3 tc) {
-    return major_radius + tc.x * cos(tc.z);
-}
-
-// We can't put these in the struct, since they'd have to be static,
-// and that causes the compiler to segfault (and I believe it's semantically
-// wrong too)
-[ForwardDifferentiable]
-[Differentiable]
-float3x3 ellis_donut_im(EllisDonut donut, float3 tc)
-{
-    let br = torus_xy_radius(donut.radius, tc);
-    return {
-        { 1., 0., 0. },
-        { 0., 1. / (br * br), 0. },
-        { 0., 0., 1. / (tc.x * tc.x + donut.wedge * donut.wedge) }
-    };
-}
-[ForwardDifferentiable]
-float3x3 ellis_donut_m(EllisDonut donut, float3 tc)
-{
-    let br = torus_xy_radius(donut.radius, tc);
-    return {
-        { 1., 0., 0. },
-        { 0., br * br, 0. },
-        { 0., 0., tc.x * tc.x + donut.wedge * donut.wedge }
-    };
-}
 
 interface SecondOrderFlow
 {
@@ -243,9 +322,9 @@ TR3 pixel_to_camera_ray(uint2 pixel_coords)
     return TR3(camera.ambient_index, camera.centre, normalize(unnormed_ray));
 }
 
-TR3 pixel_to_ellis_ray(uint2 pixel_coords)
+TR3 pixel_to_ellis_ray(Camera test_cam, uint2 pixel_coords)
 {
-    let center_metric = ellis_donut_m(test_donut, test_cam.centre);
+    let center_metric = toroidal_im(test_donut, test_cam.centre);
     let screen_bounds = float2(screen.screenSize);
     let coords = float2(pixel_coords) - (screen_bounds - 1.0) / 2.;
     let sq_norms = mul(transpose(test_cam.frame), mul(center_metric, test_cam.frame));
@@ -273,9 +352,9 @@ float4 fragment(float4 in: SV_Position)
 {
     let pixel = uint2(in.xy);
     // let ray = pixel_to_camera_ray(pixel);
-    let ray = pixel_to_ellis_ray(pixel);
-    let dt = 0.001;
-    let n = 6400;
+    let ray = pixel_to_ellis_ray(test_cam, pixel);
+    let dt = 0.01;
+    let n = 600;
     var q = ray.q;
     var v = ray.v;
     test_donut.velocity_verlet(q, v, dt, n);
