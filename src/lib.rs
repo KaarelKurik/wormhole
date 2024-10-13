@@ -4,7 +4,7 @@ use cgmath::{
 };
 use encase::{ArrayLength, ShaderType, StorageBuffer, UniformBuffer};
 use std::{
-    default, f32::consts::PI, path::Ancestors, sync::Arc, time::{Duration, Instant}
+    default, f32::consts::PI, ops::Index, path::Ancestors, sync::Arc, time::{Duration, Instant}
 };
 
 use wgpu::{include_spirv, util::DeviceExt};
@@ -17,6 +17,37 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey},
     window::{CursorGrabMode, Window, WindowAttributes},
 };
+
+// In principle, (p,q)-tensor over a d-dimensional space
+// is indexed by a (p+q)-length list of indices 0 <= i < d
+trait Tensor<const P: usize, const Q: usize, const D: usize, N: Float = f64> {
+    // length of ix must be p+q
+    fn tensor_index(&self, ix: &[usize]) -> N;
+}
+
+
+trait PointCoords<const D: usize, N: Float = f64> {
+    // 0 <= d < D
+    fn project(&self, d: usize) -> N;
+}
+
+struct SquareChart {
+    x: f64
+}
+
+impl Chart<2> for SquareChart {
+    fn contains_point<T: PointCoords<2>>(&self, p: T) -> bool {
+        (p.project(0) - self.x).abs() < 1.0 && p.project(1).abs() < 1.0
+    }
+}
+
+trait Chart<const D: usize, N: Float = f64> {
+    fn contains_point<T: PointCoords<D, N>>(&self, p: T) -> bool;
+}
+
+trait RiemannianChart<const D: usize, N: Float = f64> : Chart<D, N> {
+    fn metric<P: PointCoords<D, N>, T: Tensor<0,2, 0, N>>(&self, p: P) -> T;
+}
 
 struct CameraController {
     q_state: ElementState,
@@ -36,7 +67,7 @@ fn shuffle(x: FT<Vector3<f32>>) -> Vector3<FT<f32>> {
     x.x.zip(x.dx, |u, v| FT::new(u, v))
 }
 
-fn map_matrix<T, W, F>(m: Matrix3<T>, mut f: F) -> Matrix3<W>
+fn map_matrix_pointwise<T, W, F>(m: Matrix3<T>, mut f: F) -> Matrix3<W>
 where
     F: FnMut(T) -> W,
 {
@@ -47,23 +78,49 @@ where
     }
 }
 
+fn map_matrix_cols<T, W, F>(m: Matrix3<T>, mut f: F) -> Matrix3<W>
+where
+    F: FnMut(Vector3<T>) -> Vector3<W>,
+{
+    Matrix3 {
+        x: f(m.x),
+        y: f(m.y),
+        z: f(m.z),
+    }
+}
+
+fn biased_common_bipolar_factor(tc: Vector3<FT<f32>>) -> FT<f32> {
+    FT::<f32>::cst(0.5) * (tc.x * tc.x + FT::cst(1.0)) - tc.x * tc.y.cos()
+}
+
+fn christoffel_contract(cs: [Matrix3<f32>; 3], v: Vector3<f32>, t: Vector3<f32>) -> Vector3<f32> {
+    let mut out = Vector3::zero();
+    for k in 0..3 {
+        out[k] = -t.dot(cs[k] * v);
+    }
+    out
+}
+
 impl EllisDonut {
     fn torus_xy_radius(&self, tc: Vector3<FT<f32>>) -> FT<f32> {
-        FT::<f32>::cst(self.radius) + tc.x * tc.z.cos()
+        FT::<f32>::cst(-0.5 * self.radius) * (tc.x * tc.x - FT::cst(1.0))
+            / biased_common_bipolar_factor(tc)
     }
     fn ellis_donut_m(&self, tc: Vector3<FT<f32>>) -> Matrix3<FT<f32>> {
-        let br = self.torus_xy_radius(tc);
-        let cwedge: FT<f32> = FT::cst(self.wedge);
-
-        Matrix3::<FT<f32>>::from_diagonal(Vector3::new(
-            FT::cst(1f32),
-            br * br,
-            tc.x * tc.x + cwedge * cwedge,
-        ))
+        let bcf = biased_common_bipolar_factor(tc);
+        let bcf_sqinv: FT<f32> = FT::<f32>::cst(1.) / (bcf * bcf);
+        let xy_radius = self.torus_xy_radius(tc);
+        let xy_radius_sq = xy_radius * xy_radius;
+        let unscaled_out = Matrix3::from_diagonal(Vector3::new(
+            bcf_sqinv,
+            (tc.x * tc.x) * bcf_sqinv + self.wedge * self.wedge,
+            xy_radius_sq,
+        ));
+        return unscaled_out * FT::cst(self.radius);
     }
     fn ellis_donut_im(&self, tc: Vector3<FT<f32>>) -> Matrix3<FT<f32>> {
         let cone: FT<f32> = FT::cst(1f32);
-        Matrix3::from_diagonal(self.ellis_donut_m(tc).diagonal().map(|x| cone/x))
+        Matrix3::from_diagonal(self.ellis_donut_m(tc).diagonal().map(|x| cone / x))
     }
     fn christoffel(&self, tc: Vector3<f32>) -> [Matrix3<f32>; 3] {
         let tc0 = Vector3::new(FT::var(tc.x), FT::cst(tc.y), FT::cst(tc.z));
@@ -74,8 +131,12 @@ impl EllisDonut {
         let m1 = self.ellis_donut_m(tc1);
         let m2 = self.ellis_donut_m(tc2);
         let f = |x: FT<f32>| x.dx;
-        let m: [Matrix3<f32>; 3] = [map_matrix(m0, f), map_matrix(m1, f), map_matrix(m2, f)];
-        let im = map_matrix(self.ellis_donut_im(tc.map(|x| FT::cst(x))), |x| x.x);
+        let m: [Matrix3<f32>; 3] = [
+            map_matrix_pointwise(m0, f),
+            map_matrix_pointwise(m1, f),
+            map_matrix_pointwise(m2, f),
+        ];
+        let im = map_matrix_pointwise(self.ellis_donut_im(tc.map(|x| FT::cst(x))), |x| x.x);
         let mut out: [Matrix3<f32>; 3] = [Matrix3::from_scale(0f32); 3];
         for k in 0..3 {
             for i in 0..3 {
@@ -89,13 +150,14 @@ impl EllisDonut {
         out
     }
     // We're just going to assume the christoffel symbol is symmetric
-    fn parallel_transport_velocity(&self, q: Vector3<f32>, v: Vector3<f32>, t: Vector3<f32>) -> Vector3<f32> {
+    fn parallel_transport_velocity(
+        &self,
+        q: Vector3<f32>,
+        v: Vector3<f32>,
+        t: Vector3<f32>,
+    ) -> Vector3<f32> {
         let cs = self.christoffel(q);
-        let mut out = Vector3::zero();
-        for k in 0..3 {
-            out[k] = -t.dot(cs[k]*v);
-        }
-        out
+        christoffel_contract(cs, v, t)
     }
     fn acceleration(&self, q: Vector3<f32>, v: Vector3<f32>) -> Vector3<f32> {
         self.parallel_transport_velocity(q, v, v)
@@ -117,9 +179,36 @@ impl EllisDonut {
     }
 }
 
+// We face the problem that the user can change
+// their input at any time.
+fn parallel_transport_camera(
+    donut: &EllisDonut,
+    camera: &mut Camera,
+    vel_coords: Vector3<f32>,
+    dt: f32,
+) {
+    let v = camera.frame * vel_coords;
+    let cs0 = donut.christoffel(camera.centre);
+    let dvdt = christoffel_contract(cs0, v, v);
+    let vh = v + 0.5 * dvdt * dt;
+    let frame_accel = map_matrix_cols(camera.frame, |t| christoffel_contract(cs0, v, t));
+    let frame_h = camera.frame + 0.5 * frame_accel * dt;
+    let qf = camera.centre + vh * dt;
+    let vf_approx = v + dvdt * dt;
+    let ff_approx = camera.frame + frame_accel * dt;
+    let cs1 = donut.christoffel(qf);
+    let dvdtf_approx = christoffel_contract(cs1, vf_approx, vf_approx);
+    let frame_accel_f_approx =
+        map_matrix_cols(ff_approx, |t| christoffel_contract(cs1, vf_approx, t));
+    let vf = vh + 0.5 * dvdtf_approx * dt;
+    let frame_f = frame_h + 0.5 * frame_accel_f_approx * dt;
+    camera.centre = qf;
+    camera.frame = frame_f;
+}
+
 impl CameraController {
     // TODO: modify this to use the metric
-    fn update_camera(&mut self, camera: &mut Camera, dt: Duration) {
+    fn update_camera(&mut self, donut: &EllisDonut, camera: &mut Camera, dt: Duration) {
         const ANGULAR_SPEED: f32 = 1f32;
         const LINEAR_SPEED: f32 = 8f32;
         let dt_seconds = dt.as_secs_f32();
@@ -140,7 +229,8 @@ impl CameraController {
         if self.a_state.is_pressed() {
             linvel -= x_linvel;
         }
-        camera.centre += camera.frame * (dt_seconds * linvel);
+        // camera.centre += camera.frame * (dt_seconds * linvel);
+        parallel_transport_camera(donut, camera, linvel, dt_seconds);
 
         let mut rotvel = Vector3::<f32>::zero();
         let z_rotvel = ANGULAR_SPEED * Vector3::unit_z();
@@ -239,6 +329,7 @@ struct App<'a> {
     screen_buffer: wgpu::Buffer,
     screen_bind_group: wgpu::BindGroup,
     bind_group_1: wgpu::BindGroup,
+    donut: EllisDonut,
     camera_bind_group: wgpu::BindGroup,
     screen_size_uniform: wgpu::Buffer,
     camera: Camera,
@@ -369,7 +460,7 @@ impl<'a> App<'a> {
     }
     fn update(&mut self, new_time: Instant) {
         let dt = new_time.duration_since(self.fixed_time);
-        self.camera_controller.update_camera(&mut self.camera, dt);
+        self.camera_controller.update_camera(&self.donut, &mut self.camera, dt);
         self.camera_uniform.write(&self.camera).unwrap();
         self.queue.write_buffer(
             &self.camera_buffer,
@@ -607,6 +698,11 @@ impl<'a> ApplicationHandler for AppState<'a> {
                     d_state: ElementState::Released,
                 };
 
+                let donut = EllisDonut {
+                    radius: 1.0,
+                    wedge: 0.1,
+                };
+
                 let toruses = Toruses {
                     torus_count: ArrayLength,
                     torus_array: vec![
@@ -762,6 +858,7 @@ impl<'a> ApplicationHandler for AppState<'a> {
                     screen_bind_group,
                     screen_buffer,
                     bind_group_1,
+                    donut,
                     camera_bind_group,
                     screen_size_uniform,
                     camera,

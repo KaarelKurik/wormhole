@@ -995,6 +995,8 @@ fn vertex(@builtin(vertex_index) in_vertex_index: u32) -> @builtin(position) vec
 @fragment
 fn fragment(@builtin(position) in: vec4<f32>) -> @location(0) vec4<f32>
 {
+        screen.screenSize = vec2(1u,1u);
+
     let pos = vec2<u32>(in.xy);
     // return screen.screenArray[pos.y * screen.screenSize.x + pos.x];
     let lin_color = screen.screenArray[pos.y * screen.screenSize.x + pos.x];
