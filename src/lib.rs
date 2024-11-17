@@ -1,10 +1,13 @@
+mod tensor;
+
 use autodiff::{Float, FT};
 use cgmath::{
     Array, InnerSpace, Matrix, Matrix3, Matrix4, Rad, SquareMatrix, Vector2, Vector3, Zero,
 };
 use encase::{ArrayLength, ShaderType, StorageBuffer, UniformBuffer};
+use graph_builder::DirectedALGraph;
 use std::{
-    default, f32::consts::PI, ops::Index, path::Ancestors, sync::Arc, time::{Duration, Instant}
+    default, f32::consts::PI, marker::PhantomData, ops::{Index, IndexMut}, path::Ancestors, sync::Arc, time::{Duration, Instant}
 };
 
 use wgpu::{include_spirv, util::DeviceExt};
@@ -18,36 +21,7 @@ use winit::{
     window::{CursorGrabMode, Window, WindowAttributes},
 };
 
-// In principle, (p,q)-tensor over a d-dimensional space
-// is indexed by a (p+q)-length list of indices 0 <= i < d
-trait Tensor<const P: usize, const Q: usize, const D: usize, N: Float = f64> {
-    // length of ix must be p+q
-    fn tensor_index(&self, ix: &[usize]) -> N;
-}
 
-
-trait PointCoords<const D: usize, N: Float = f64> {
-    // 0 <= d < D
-    fn project(&self, d: usize) -> N;
-}
-
-struct SquareChart {
-    x: f64
-}
-
-impl Chart<2> for SquareChart {
-    fn contains_point<T: PointCoords<2>>(&self, p: T) -> bool {
-        (p.project(0) - self.x).abs() < 1.0 && p.project(1).abs() < 1.0
-    }
-}
-
-trait Chart<const D: usize, N: Float = f64> {
-    fn contains_point<T: PointCoords<D, N>>(&self, p: T) -> bool;
-}
-
-trait RiemannianChart<const D: usize, N: Float = f64> : Chart<D, N> {
-    fn metric<P: PointCoords<D, N>, T: Tensor<0,2, 0, N>>(&self, p: P) -> T;
-}
 
 struct CameraController {
     q_state: ElementState,

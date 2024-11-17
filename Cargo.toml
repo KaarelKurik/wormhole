@@ -17,3 +17,6 @@ bytemuck = {version = "1"}
 cgmath = {version = "0"}
 autodiff = {version = "0", features = ["cgmath"]}
 encase = {version = "0", features = ["cgmath"]}
+graph_builder = {version = "0"}
+ndarray = "0.16.1"
+einsum-derive = "0.1.0"

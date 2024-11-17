@@ -123,6 +123,7 @@ float badtorus_xy_radius(float major_radius, float3 tc)
 float torus_xy_radius(float major_radius, float3 tc)
 {
     // tc order is (r, sigma, phi)
+    // (r = exp(tau) relative to the wikipedia exposition on toroidal coords)
     // we assume abs(r) < 1 for sign correctness
     return -0.5 * major_radius * (tc.x * tc.x - 1) / biased_common_bipolar_factor(tc);
 }
@@ -217,10 +218,12 @@ float3x3 toroidal_m(EllisDonut donut, float3 tc) {
     // let upper_biased = (0.5 * (tc.x * tc.x - 1));
     // let ub_sq = upper_biased * upper_biased;
     // let xy_radius_sq = ub_sq * bcf_sqinv; // same as torus_xy_radius(1., tc) squared
-    let xy_radius_sq = torus_xy_radius(1., tc) * torus_xy_radius(1., tc);
+    let xy_radius = torus_xy_radius(1., tc);
+    let xy_radius_sq = xy_radius * xy_radius;
+    let penalty = smoothstep(0., 1., xy_radius_sq);
     let unscaled_out : float3x3 = {
         { bcf_sqinv, 0., 0. },
-        { 0., (tc.x * tc.x) * bcf_sqinv + donut.wedge * donut.wedge, 0. },
+        { 0., (tc.x * tc.x) * bcf_sqinv + donut.wedge * donut.wedge * penalty, 0. },
         { 0., 0., xy_radius_sq}
     };
     return donut.radius * unscaled_out;
