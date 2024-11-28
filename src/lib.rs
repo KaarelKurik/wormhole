@@ -69,12 +69,41 @@ impl<T: BufWrite> TurkishMan<T> {
     }
 }
 
-trait Unwrap<T> {
+trait Unwrap<'a, T, W> {
     fn get(&self) -> &T;
-    fn get_mut<'a>(&'a mut self) -> Wrapper<'a, T>;
+    fn get_mut(&'a mut self, w: W) -> Wrapper<'a, T>;
 }
 
+#[derive(Debug, ShaderType)]
+struct Camera {
+    frame: Matrix3<f32>,
+    centre: Vector3<f32>,
+    ambient_index: u32,
+    yfov: f32,
+}
 
+struct CameraGraphicsObject {
+    camera: Camera,
+    camera_buffer: wgpu::Buffer,
+    camera_uniform: UniformBuffer<Vec<u8>>,
+}
+
+impl<'a> Unwrap<'a, Camera, &'a wgpu::Queue> for CameraGraphicsObject {
+    fn get(&self) -> &Camera {
+        &self.camera
+    }
+
+    fn get_mut(&'a mut self, q : &'a wgpu::Queue) -> Wrapper<'a, Camera> {
+        Wrapper {
+            postop: Box::new(|t| {
+                self.camera_uniform.write(t).unwrap();
+                q.write_buffer(&self.camera_buffer, 0, self.camera_uniform.as_ref().as_slice());
+                
+            }),
+            tw: &mut self.camera,
+        }
+    }
+}
 
 struct CameraController {
     q_state: ElementState,
@@ -88,19 +117,6 @@ struct CameraController {
 struct EllisDonut {
     radius: f32,
     wedge: f32,
-}
-
-#[macro_export]
-macro_rules! vecy {
-    ( $( $x:expr ),* ) => {
-        {
-            let mut temp_vec = Vec::new();
-            $(
-                temp_vec.push($x);
-            )*
-            temp_vec
-        }
-    };
 }
 
 // use pie_flavor's suggestion of a CommitGuard<'_, T> approach to reactive values.
@@ -337,38 +353,6 @@ impl CameraController {
         }
         .normalize();
         camera.frame = camera.frame * Matrix3::from_axis_angle(axis, Rad(angle));
-    }
-}
-
-#[derive(Debug, ShaderType)]
-struct Camera {
-    frame: Matrix3<f32>,
-    centre: Vector3<f32>,
-    ambient_index: u32,
-    yfov: f32,
-}
-
-struct CameraGraphicsObject {
-    camera: Camera,
-    camera_buffer: wgpu::Buffer,
-    camera_uniform: UniformBuffer<Vec<u8>>,
-    queue: Rc<wgpu::Queue>
-}
-
-impl Unwrap<Camera> for CameraGraphicsObject {
-    fn get(&self) -> &Camera {
-        &self.camera
-    }
-
-    fn get_mut<'a>(&'a mut self) -> Wrapper<'a, Camera> {
-        Wrapper {
-            postop: Box::new(|t| {
-                self.camera_uniform.write(t).unwrap();
-                self.queue.write_buffer(&self.camera_buffer, 0, self.camera_uniform.as_ref().as_slice());
-                
-            }),
-            tw: &mut self.camera,
-        }
     }
 }
 
