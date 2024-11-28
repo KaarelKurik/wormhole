@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 winit = {version = "0"}
 # winit = {git = "https://github.com/rust-windowing/winit.git", branch="master"}
-wgpu = {version = "22", features = ["spirv"]}
+wgpu = {version = "23", features = ["spirv"]}
 # wgpu = {git = "https://github.com/gfx-rs/wgpu.git", branch="trunk"}
 pollster = {version = "0"}
 env_logger = {version = "0"}

@@ -80,3 +80,38 @@
 // you get from it are gigacursed.
 // Ideally (x+1)^2(g'(x))^2 - 1 has no roots, but the problem is that due to the limiting
 // behavior of (g'), if g' is continuous, a root is guaranteed.
+
+interface Sdf
+{
+    float sdf(float3 x);
+    void sdfBackProp(inout DifferentialPair<float3> x, float dResult);
+}
+
+interface MetricChart
+{
+    float3x3 metric(float3 x);
+    float3x3 inverseMetric(float3 x);
+}
+
+Sdf[] sdf_objects;
+
+struct HalfThroat {
+    float4x4 transform;
+    uint32_t sdf_index;
+    uint32_t ambient_index;
+    // 1st point of order: test whether projectOntoZero works.
+    float3 projectOntoZero(float3 x) {
+        let KSTEPS = 10;
+        let sdf_obj = sdf_objects[sdf_index];
+        var lambda : float = 0.0;
+        // We're going to rescale our pullback so we get a vector instead of a covector
+        // Just divide it by square norm
+        var yPair : DifferentialPair<float3> = diffPair(x, 0);
+        for (int k = 0; k < KSTEPS; ++k) {
+            yPair = diffPair(x - lambda * yPair.d, yPair.d);
+            sdf_obj.sdfBackProp(yPair, rcp(dot(yPair.d, yPair.d)));
+            lambda += sdf_obj.sdf(yPair.v);
+        }
+        return yPair.v;
+    }
+}

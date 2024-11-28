@@ -7,10 +7,10 @@ use cgmath::{
 use encase::{ArrayLength, ShaderType, StorageBuffer, UniformBuffer};
 use graph_builder::DirectedALGraph;
 use std::{
-    default, f32::consts::PI, marker::PhantomData, ops::{Index, IndexMut}, path::Ancestors, sync::Arc, time::{Duration, Instant}
+    default, f32::consts::PI, marker::PhantomData, ops::{Deref, DerefMut, Index, IndexMut}, path::Ancestors, rc::Rc, sync::Arc, time::{Duration, Instant}
 };
 
-use wgpu::{include_spirv, util::DeviceExt};
+use wgpu::{include_spirv, util::DeviceExt, BindGroup, DynamicOffset};
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalSize,
@@ -20,6 +20,59 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey},
     window::{CursorGrabMode, Window, WindowAttributes},
 };
+
+trait BufWrite: Sized {
+    fn write_buf(&self, buf: &mut Buf<Self>);
+}
+struct Buf<T> {
+    ph: PhantomData<T>,
+}
+
+struct Wrapper<'a, T> {
+    postop: Box<dyn for<'b> FnMut(&'b mut T) + 'a>,
+    tw: &'a mut T,
+}
+
+impl<'a, T> Drop for Wrapper<'a, T> {
+    fn drop(&mut self) {
+        (self.postop)(self.tw);
+    }
+}
+
+impl<'a, T> Deref for Wrapper<'a, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        self.tw
+    }
+}
+
+impl<'a, T> DerefMut for Wrapper<'a, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.tw
+    }
+}
+struct TurkishMan<T: BufWrite> {
+    buf: Buf<T>,
+    t: T,
+}
+
+impl<T: BufWrite> TurkishMan<T> {
+    fn get(&self) -> &T {
+        &self.t
+    }
+    fn get_mut<'a>(&'a mut self) -> Wrapper<'a, T> {
+        Wrapper {
+            postop: Box::new(|t| t.write_buf(&mut self.buf)),
+            tw: &mut self.t,
+        }
+    }
+}
+
+trait Unwrap<T> {
+    fn get(&self) -> &T;
+    fn get_mut<'a>(&'a mut self) -> Wrapper<'a, T>;
+}
 
 
 
@@ -35,6 +88,33 @@ struct CameraController {
 struct EllisDonut {
     radius: f32,
     wedge: f32,
+}
+
+#[macro_export]
+macro_rules! vecy {
+    ( $( $x:expr ),* ) => {
+        {
+            let mut temp_vec = Vec::new();
+            $(
+                temp_vec.push($x);
+            )*
+            temp_vec
+        }
+    };
+}
+
+// use pie_flavor's suggestion of a CommitGuard<'_, T> approach to reactive values.
+// Basically have a struct containing both a data buffer and a mutable object,
+// whenever I mutate the object the data buffer has to get updated, and the
+// way this happens is that the outer struct has a get_mut() method which gives
+// me a CommitGuard<'_, T>, which itself dereferences to the inner object,
+// and which commits to the buffer when it gets dropped.
+// The other issue is that I should only be able to use the buffer when no CommitGuards
+// are live. This should be enforced by the borrow checker automatically so dw.
+struct PositionedBindGroup<'a> {
+    bind_group: &'a BindGroup,
+    index: u32,
+    offsets: &'a [DynamicOffset],
 }
 
 fn shuffle(x: FT<Vector3<f32>>) -> Vector3<FT<f32>> {
@@ -268,6 +348,31 @@ struct Camera {
     yfov: f32,
 }
 
+struct CameraGraphicsObject {
+    camera: Camera,
+    camera_buffer: wgpu::Buffer,
+    camera_uniform: UniformBuffer<Vec<u8>>,
+    queue: Rc<wgpu::Queue>
+}
+
+impl Unwrap<Camera> for CameraGraphicsObject {
+    fn get(&self) -> &Camera {
+        &self.camera
+    }
+
+    fn get_mut<'a>(&'a mut self) -> Wrapper<'a, Camera> {
+        Wrapper {
+            postop: Box::new(|t| {
+                self.camera_uniform.write(t).unwrap();
+                self.queue.write_buffer(&self.camera_buffer, 0, self.camera_uniform.as_ref().as_slice());
+                
+            }),
+            tw: &mut self.camera,
+        }
+    }
+}
+
+
 #[derive(ShaderType)]
 struct TorusThroat {
     ambient_index: u32,  // index into ambient buffer
@@ -434,7 +539,8 @@ impl<'a> App<'a> {
     }
     fn update(&mut self, new_time: Instant) {
         let dt = new_time.duration_since(self.fixed_time);
-        self.camera_controller.update_camera(&self.donut, &mut self.camera, dt);
+        self.camera_controller
+            .update_camera(&self.donut, &mut self.camera, dt);
         self.camera_uniform.write(&self.camera).unwrap();
         self.queue.write_buffer(
             &self.camera_buffer,
@@ -767,7 +873,7 @@ impl<'a> ApplicationHandler for AppState<'a> {
                         label: Some("compute_pipeline"),
                         layout: Some(&compute_pipeline_layout),
                         module: &shader,
-                        entry_point: "main",
+                        entry_point: Some("main"),
                         compilation_options: Default::default(),
                         cache: None,
                     });
@@ -785,7 +891,7 @@ impl<'a> ApplicationHandler for AppState<'a> {
                         layout: Some(&render_pipeline_layout),
                         vertex: wgpu::VertexState {
                             module: &shader,
-                            entry_point: "main",
+                            entry_point: Some("main"),
                             compilation_options: Default::default(),
                             buffers: &[],
                         },
@@ -806,7 +912,7 @@ impl<'a> ApplicationHandler for AppState<'a> {
                         },
                         fragment: Some(wgpu::FragmentState {
                             module: &shader,
-                            entry_point: "main",
+                            entry_point: Some("main"),
                             compilation_options: Default::default(),
                             targets: &[Some(wgpu::ColorTargetState {
                                 format: surface_format,
