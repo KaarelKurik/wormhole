@@ -29,13 +29,14 @@ struct Buf<T> {
 }
 
 struct Wrapper<'a, T> {
-    postop: Box<dyn for<'b> FnMut(&'b mut T) + 'a>,
+    postop: Box<dyn for<'b> FnOnce(&'b mut T) + 'a>,
     tw: &'a mut T,
 }
 
 impl<'a, T> Drop for Wrapper<'a, T> {
     fn drop(&mut self) {
-        (self.postop)(self.tw);
+        let f = std::mem::replace(&mut self.postop, Box::new(|_| {}));
+        f(&mut self.tw);
     }
 }
 
@@ -69,9 +70,9 @@ impl<T: BufWrite> TurkishMan<T> {
     }
 }
 
-trait Unwrap<'a, T, W> {
+trait Unwrap<'a, T> {
     fn get(&self) -> &T;
-    fn get_mut(&'a mut self, w: W) -> Wrapper<'a, T>;
+    fn get_mut(&'a mut self, w: Box<dyn for<'b> FnOnce(&'b mut T) + 'a>) -> Wrapper<'a, T>;
 }
 
 #[derive(Debug, ShaderType)]
@@ -88,20 +89,25 @@ struct CameraGraphicsObject {
     camera_uniform: UniformBuffer<Vec<u8>>,
 }
 
-impl<'a> Unwrap<'a, Camera, &'a wgpu::Queue> for CameraGraphicsObject {
+impl<'a> Unwrap<'a, Camera> for Camera {
     fn get(&self) -> &Camera {
-        &self.camera
+        &self
     }
+    
+    fn get_mut(&'a mut self, w: Box<dyn for<'b> FnOnce(&'b mut Camera) + 'a>) -> Wrapper<'a, Camera> {
+        Wrapper { postop: w, tw: self }
+    }
+}
 
-    fn get_mut(&'a mut self, q : &'a wgpu::Queue) -> Wrapper<'a, Camera> {
-        Wrapper {
-            postop: Box::new(|t| {
-                self.camera_uniform.write(t).unwrap();
-                q.write_buffer(&self.camera_buffer, 0, self.camera_uniform.as_ref().as_slice());
-                
-            }),
-            tw: &mut self.camera,
-        }
+impl CameraGraphicsObject {
+    fn get_postwrite<'a>(&'a mut self, q: &'a mut wgpu::Queue) -> Wrapper<'a, Camera> {
+        self.camera.get_mut(Box::new(|t| {
+            self.camera_uniform.write(t).unwrap();
+            q.write_buffer(&self.camera_buffer, 0, self.camera_uniform.as_ref().as_slice());
+        }))
+    }
+    fn get_nowrite(&mut self) -> &mut Camera {
+        &mut self.camera
     }
 }
 
@@ -395,10 +401,8 @@ struct App<'a> {
     donut: EllisDonut,
     camera_bind_group: wgpu::BindGroup,
     screen_size_uniform: wgpu::Buffer,
-    camera: Camera,
+    camera_go: CameraGraphicsObject,
     camera_controller: CameraController,
-    camera_uniform: UniformBuffer<Vec<u8>>,
-    camera_buffer: wgpu::Buffer,
     fixed_time: Instant,
     mouse_capture_mode: CursorGrabMode,
     cursor_is_visible: bool,
@@ -515,7 +519,7 @@ impl<'a> App<'a> {
             CursorGrabMode::Confined | CursorGrabMode::Locked => {
                 if let DeviceEvent::MouseMotion { delta } = event {
                     self.camera_controller
-                        .process_mouse_motion(&mut self.camera, delta);
+                        .process_mouse_motion(&mut self.camera_go.get_nowrite(), delta);
                 }
             }
             _ => {}
@@ -524,13 +528,7 @@ impl<'a> App<'a> {
     fn update(&mut self, new_time: Instant) {
         let dt = new_time.duration_since(self.fixed_time);
         self.camera_controller
-            .update_camera(&self.donut, &mut self.camera, dt);
-        self.camera_uniform.write(&self.camera).unwrap();
-        self.queue.write_buffer(
-            &self.camera_buffer,
-            0,
-            self.camera_uniform.as_ref().as_slice(),
-        );
+            .update_camera(&self.donut, &mut self.camera_go.get_postwrite(&mut self.queue), dt);
 
         self.fixed_time = new_time;
     }
@@ -753,6 +751,12 @@ impl<'a> ApplicationHandler for AppState<'a> {
                     usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 });
 
+                let camera_go = CameraGraphicsObject {
+                    camera,
+                    camera_buffer,
+                    camera_uniform,
+                };
+
                 let camera_controller = CameraController {
                     q_state: ElementState::Released,
                     e_state: ElementState::Released,
@@ -812,7 +816,7 @@ impl<'a> ApplicationHandler for AppState<'a> {
                     entries: &[
                         wgpu::BindGroupEntry {
                             binding: 0,
-                            resource: camera_buffer.as_entire_binding(),
+                            resource: camera_go.camera_buffer.as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,
@@ -841,7 +845,7 @@ impl<'a> ApplicationHandler for AppState<'a> {
                     layout: &camera_bind_group_layout,
                     entries: &[wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: camera_buffer.as_entire_binding(),
+                        resource: camera_go.camera_buffer.as_entire_binding(),
                     }],
                 });
 
@@ -925,10 +929,8 @@ impl<'a> ApplicationHandler for AppState<'a> {
                     donut,
                     camera_bind_group,
                     screen_size_uniform,
-                    camera,
+                    camera_go,
                     camera_controller,
-                    camera_buffer,
-                    camera_uniform,
                     fixed_time,
                     mouse_capture_mode,
                     cursor_is_visible,
