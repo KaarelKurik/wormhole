@@ -15,6 +15,7 @@ env_logger = {version = "0"}
 log = {version = "0"}
 bytemuck = {version = "1"}
 cgmath = {version = "0"}
+tt-call = {version = "1"}
 autodiff = {version = "0", features = ["cgmath"]}
 encase = {version = "0", features = ["cgmath"]}
 graph_builder = {version = "0"}

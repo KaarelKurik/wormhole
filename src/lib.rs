@@ -5,10 +5,13 @@ use cgmath::{
     Array, InnerSpace, Matrix, Matrix3, Matrix4, Rad, SquareMatrix, Vector2, Vector3, Zero,
 };
 use encase::{ArrayLength, ShaderType, StorageBuffer, UniformBuffer};
-use graph_builder::DirectedALGraph;
 use std::{
-    default, f32::consts::PI, marker::PhantomData, ops::{Deref, DerefMut, Index, IndexMut}, path::Ancestors, rc::Rc, sync::Arc, time::{Duration, Instant}
+    f32::consts::PI,
+    ops::{Deref, DerefMut},
+    sync::Arc,
+    time::{Duration, Instant},
 };
+use tt_call::{tt_call, tt_return};
 
 use wgpu::{include_spirv, util::DeviceExt, BindGroup, DynamicOffset};
 use winit::{
@@ -20,13 +23,6 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey},
     window::{CursorGrabMode, Window, WindowAttributes},
 };
-
-trait BufWrite: Sized {
-    fn write_buf(&self, buf: &mut Buf<Self>);
-}
-struct Buf<T> {
-    ph: PhantomData<T>,
-}
 
 struct Wrapper<'a, T> {
     postop: Box<dyn for<'b> FnOnce(&'b mut T) + 'a>,
@@ -53,22 +49,6 @@ impl<'a, T> DerefMut for Wrapper<'a, T> {
         self.tw
     }
 }
-struct TurkishMan<T: BufWrite> {
-    buf: Buf<T>,
-    t: T,
-}
-
-impl<T: BufWrite> TurkishMan<T> {
-    fn get(&self) -> &T {
-        &self.t
-    }
-    fn get_mut<'a>(&'a mut self) -> Wrapper<'a, T> {
-        Wrapper {
-            postop: Box::new(|t| t.write_buf(&mut self.buf)),
-            tw: &mut self.t,
-        }
-    }
-}
 
 trait Unwrap<'a, T> {
     fn get(&self) -> &T;
@@ -83,33 +63,182 @@ struct Camera {
     yfov: f32,
 }
 
-struct CameraGraphicsObject {
-    camera: Camera,
-    camera_buffer: wgpu::Buffer,
-    camera_uniform: UniformBuffer<Vec<u8>>,
+macro_rules! repeat {
+    ($e:tt, $($x:tt),*) => {
+        $($e ! $x;)*
+    }
 }
 
-impl<'a> Unwrap<'a, Camera> for Camera {
-    fn get(&self) -> &Camera {
-        &self
-    }
+macro_rules! ck {
+
+    // initialize
+    {
+        ()
+        $($stuff:tt)*
+    } => {
+        ck ! {
+            (((TOP NIL)))
+            $($stuff)*
+        }
+    };
+
+    // improper stack, anything to process => proper stack, anything + remainder to process
+    {
+        ((($x:ident $h:tt $($v:tt)*) $($rem:tt)+) $($se:tt)*)
+        $($stuff:tt)*
+    } => {
+        ck ! {
+            ((($x $h $($v)*)) $($se)*)
+            $($stuff)*
+            $($rem)+
+        }
+    };
+
+    // proper op stack, nothing to process => application
+    {
+        (((OP $h:tt $($v:tt)*)) $($se:tt)*)
+    } => {
+        $h ! {
+            ($($se)*)
+            $($v)*
+        }
+    };
+
+    // proper top stack, nothing to process => return
+    {
+        (((TOP NIL $($v:tt)*)))
+    } => {
+        $($v)*
+    };
+
+    // missing proper delimiter stack, nothing to process.
+
+    // proper nonempty general stack, op and remainder to process => push op, preserve remainder, recurse into body
+    {
+        ((($x:ident $h:tt $($v:tt)*)) $($se:tt)*)
+        $op:tt ! {$($body:tt)*}
+        $($rem:tt)*
+    } => {
+        ck ! {
+            (((OP $op)) (($x $h $($v)*) $($rem)*) $($se)*)
+            $($body)*
+        }
+    };
+
+    // proper nonempty general stack, non-op to process => pull in value, step forward in body
+    {
+        ((($x:ident $h:tt $($v:tt)*)) $($se:tt)*)
+        $step:tt
+        $($stuff:tt)*
+    } => {
+        ck ! {
+            ((($x $h $($v)* $step)) $($se)*)
+            $($stuff)*
+        }
+    };
+}
+
+macro_rules! ck_goose {
+    {
+        $s:tt
+        $e:tt
+        $t:tt
+    } => {
+        ck ! {
+            $s
+            struct $e {
+                pub obj: $t,
+                buffer: wgpu::Buffer,
+                uniform: UniformBuffer<Vec<u8>>,
+            }
     
-    fn get_mut(&'a mut self, w: Box<dyn for<'b> FnOnce(&'b mut Camera) + 'a>) -> Wrapper<'a, Camera> {
-        Wrapper { postop: w, tw: self }
+            impl $e {
+                fn write_changes(&mut self, q: &mut wgpu::Queue) {
+                    self.uniform.write(&self.obj).unwrap();
+                    q.write_buffer(
+                        &self.buffer,
+                        0,
+                        self.uniform.as_ref().as_slice(),
+                    );
+                }
+            }
+        }
     }
 }
 
-impl CameraGraphicsObject {
-    fn get_postwrite<'a>(&'a mut self, q: &'a mut wgpu::Queue) -> Wrapper<'a, Camera> {
-        self.camera.get_mut(Box::new(|t| {
-            self.camera_uniform.write(t).unwrap();
-            q.write_buffer(&self.camera_buffer, 0, self.camera_uniform.as_ref().as_slice());
-        }))
-    }
-    fn get_nowrite(&mut self) -> &mut Camera {
-        &mut self.camera
+macro_rules! ck_map {
+    {
+        $s:tt
+        $m:tt
+        {$($e:tt)*}
+    } => {
+        ck ! {
+            $s
+            $($m ! $e)*
+        }
     }
 }
+
+ck! {
+    ()
+    ck_goose! {CameraGraphicsObject Camera}
+}
+
+macro_rules! goose {
+    ($e:ident, $t:ty) => {
+        struct $e {
+            pub obj: $t,
+            buffer: wgpu::Buffer,
+            uniform: UniformBuffer<Vec<u8>>,
+        }
+
+        impl $e {
+            fn write_changes(&mut self, q: &mut wgpu::Queue) {
+                self.uniform.write(&self.obj).unwrap();
+                q.write_buffer(
+                    &self.buffer,
+                    0,
+                    self.uniform.as_ref().as_slice(),
+                );
+            }
+        }
+    };
+}
+
+macro_rules! good_goose {
+    {
+        $caller:tt
+        easy = [{ $e:ident }]
+        peasy = [{ $t:ty }]
+    } => {
+        goose!($e, $t);
+    }
+}
+
+// tt_call! {
+//     macro = [{ good_goose }]
+//     easy = [{ CameraGraphicsObject }]
+//     peasy = [{ Camera }]
+// }
+
+
+
+// struct CameraGraphicsObject {
+//     pub camera: Camera,
+//     camera_buffer: wgpu::Buffer,
+//     camera_uniform: UniformBuffer<Vec<u8>>,
+// }
+
+// impl CameraGraphicsObject {
+//     fn write_changes(&mut self, q: &mut wgpu::Queue) {
+//         self.camera_uniform.write(&self.camera).unwrap();
+//         q.write_buffer(
+//             &self.camera_buffer,
+//             0,
+//             self.camera_uniform.as_ref().as_slice(),
+//         );
+//     }
+// }
 
 struct CameraController {
     q_state: ElementState,
@@ -120,27 +249,18 @@ struct CameraController {
     d_state: ElementState,
 }
 
+struct PointController {
+    u_state: ElementState,
+    o_state: ElementState,
+    i_state: ElementState,
+    m_state: ElementState,
+    j_state: ElementState,
+    l_state: ElementState,
+}
+
 struct EllisDonut {
     radius: f32,
     wedge: f32,
-}
-
-// use pie_flavor's suggestion of a CommitGuard<'_, T> approach to reactive values.
-// Basically have a struct containing both a data buffer and a mutable object,
-// whenever I mutate the object the data buffer has to get updated, and the
-// way this happens is that the outer struct has a get_mut() method which gives
-// me a CommitGuard<'_, T>, which itself dereferences to the inner object,
-// and which commits to the buffer when it gets dropped.
-// The other issue is that I should only be able to use the buffer when no CommitGuards
-// are live. This should be enforced by the borrow checker automatically so dw.
-struct PositionedBindGroup<'a> {
-    bind_group: &'a BindGroup,
-    index: u32,
-    offsets: &'a [DynamicOffset],
-}
-
-fn shuffle(x: FT<Vector3<f32>>) -> Vector3<FT<f32>> {
-    x.x.zip(x.dx, |u, v| FT::new(u, v))
 }
 
 fn map_matrix_pointwise<T, W, F>(m: Matrix3<T>, mut f: F) -> Matrix3<W>
@@ -282,6 +402,60 @@ fn parallel_transport_camera(
     camera.frame = frame_f;
 }
 
+impl PointController {
+    fn update_point(&mut self, point: &mut Vector3<f32>, dt: Duration) {
+        const LINEAR_SPEED: f32 = 0.5f32;
+        let mut linvel = Vector3::<f32>::zero();
+        let z_linvel = LINEAR_SPEED * Vector3::unit_z();
+        let x_linvel = LINEAR_SPEED * Vector3::unit_x();
+        let y_linvel = LINEAR_SPEED * Vector3::unit_y();
+
+        if self.u_state.is_pressed() {
+            linvel -= z_linvel;
+        }
+        if self.o_state.is_pressed() {
+            linvel += z_linvel;
+        }
+        if self.i_state.is_pressed() {
+            linvel += y_linvel;
+        }
+        if self.m_state.is_pressed() {
+            linvel -= y_linvel;
+        }
+        if self.j_state.is_pressed() {
+            linvel -= x_linvel;
+        }
+        if self.l_state.is_pressed() {
+            linvel += x_linvel;
+        }
+        *point += linvel * dt.as_secs_f32();
+    }
+    fn process_window_event(&mut self, event: &winit::event::WindowEvent) {
+        match event {
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        physical_key: PhysicalKey::Code(code),
+                        repeat: false,
+                        state,
+                        ..
+                    },
+                ..
+            } => match code {
+                // TODO: refactor this to have a single source of truth
+                KeyCode::KeyI => self.i_state = *state,
+                KeyCode::KeyM => self.m_state = *state,
+                KeyCode::KeyJ => self.j_state = *state,
+                KeyCode::KeyL => self.l_state = *state,
+                KeyCode::KeyU => self.u_state = *state,
+                KeyCode::KeyO => self.o_state = *state,
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+}
+
 impl CameraController {
     // TODO: modify this to use the metric
     fn update_camera(&mut self, donut: &EllisDonut, camera: &mut Camera, dt: Duration) {
@@ -305,8 +479,8 @@ impl CameraController {
         if self.a_state.is_pressed() {
             linvel -= x_linvel;
         }
-        // camera.centre += camera.frame * (dt_seconds * linvel);
-        parallel_transport_camera(donut, camera, linvel, dt_seconds);
+        camera.centre += camera.frame * (dt_seconds * linvel);
+        // parallel_transport_camera(donut, camera, linvel, dt_seconds);
 
         let mut rotvel = Vector3::<f32>::zero();
         let z_rotvel = ANGULAR_SPEED * Vector3::unit_z();
@@ -362,7 +536,6 @@ impl CameraController {
     }
 }
 
-
 #[derive(ShaderType)]
 struct TorusThroat {
     ambient_index: u32,  // index into ambient buffer
@@ -395,7 +568,6 @@ struct App<'a> {
     queue: wgpu::Queue,
     compute_pipeline: wgpu::ComputePipeline,
     render_pipeline: wgpu::RenderPipeline,
-    screen_buffer: wgpu::Buffer,
     screen_bind_group: wgpu::BindGroup,
     bind_group_1: wgpu::BindGroup,
     donut: EllisDonut,
@@ -419,20 +591,6 @@ impl<'a> App<'a> {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("encoder"),
             });
-        // {
-        //     let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-        //         label: Some("compute_pass"),
-        //         timestamp_writes: None,
-        //     });
-        //     compute_pass.set_pipeline(&self.compute_pipeline);
-        //     compute_pass.set_bind_group(0, &self.screen_bind_group, &[]);
-        //     compute_pass.set_bind_group(1, &self.bind_group_1, &[]);
-        //     compute_pass.dispatch_workgroups(
-        //         (self.size.width / 16) + 1,
-        //         (self.size.height / 16) + 1,
-        //         1,
-        //     );
-        // }
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("render_pass"),
@@ -468,12 +626,6 @@ impl<'a> App<'a> {
             self.surface_config.width = new_size.width;
             self.surface_config.height = new_size.height;
             self.surface.configure(&self.device, &self.surface_config);
-            self.queue.write_buffer(
-                &self.screen_size_uniform,
-                0,
-                bytemuck::bytes_of(&[self.size.width, self.size.height]),
-            ); // TODO: less magic
-            self.queue.submit([]);
         }
     }
     fn toggle_mouse_capture(&mut self) {
@@ -519,17 +671,28 @@ impl<'a> App<'a> {
             CursorGrabMode::Confined | CursorGrabMode::Locked => {
                 if let DeviceEvent::MouseMotion { delta } = event {
                     self.camera_controller
-                        .process_mouse_motion(&mut self.camera_go.get_nowrite(), delta);
+                        .process_mouse_motion(&mut self.camera_go.obj, delta);
                 }
             }
             _ => {}
         }
     }
-    fn update(&mut self, new_time: Instant) {
+    fn update_graphics_state(&mut self) {
+        self.camera_go.write_changes(&mut self.queue);
+        self.queue.write_buffer(
+            &self.screen_size_uniform,
+            0,
+            bytemuck::bytes_of(&[self.size.width, self.size.height]),
+        );
+    }
+    fn update_logic_state(&mut self, new_time: Instant) {
         let dt = new_time.duration_since(self.fixed_time);
         self.camera_controller
-            .update_camera(&self.donut, &mut self.camera_go.get_postwrite(&mut self.queue), dt);
+            .update_camera(&self.donut, &mut self.camera_go.obj, dt);
 
+        // Write all deferrable logic (not rendering) changes.
+        // Maybe I should have wrapper logic just to set a bit telling me whether
+        // a change needs to be written?
         self.fixed_time = new_time;
     }
 }
@@ -544,7 +707,7 @@ impl<'a> ApplicationHandler for AppState<'a> {
             AppState::Uninitialized() => {}
             AppState::Initialized(app) => {
                 let new_time = Instant::now();
-                app.update(new_time);
+                app.update_logic_state(new_time);
                 if cause == winit::event::StartCause::Poll {
                     app.window.request_redraw();
                 }
@@ -624,7 +787,7 @@ impl<'a> ApplicationHandler for AppState<'a> {
 
                 surface.configure(&device, &surface_config); // causes segfault if device, surface_config die.
 
-                let shader = device.create_shader_module(include_spirv!("simple.spv"));
+                let shader = device.create_shader_module(include_spirv!("principled.spv"));
 
                 // TODO: think about whether we could redo the binding with reflection.
                 let screen_texture_format = wgpu::TextureFormat::Rgba16Float;
@@ -665,13 +828,6 @@ impl<'a> ApplicationHandler for AppState<'a> {
                     });
                 let screen_width = 1920u32;
                 let screen_height = 1080u32;
-
-                let screen_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("screen_buffer"),
-                    size: (u64::from(screen_width) * u64::from(screen_height)) * 16, // TODO: less magic
-                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
 
                 let screen_texture = device.create_texture(&wgpu::TextureDescriptor {
                     label: Some("screen"),
@@ -752,9 +908,9 @@ impl<'a> ApplicationHandler for AppState<'a> {
                 });
 
                 let camera_go = CameraGraphicsObject {
-                    camera,
-                    camera_buffer,
-                    camera_uniform,
+                    obj: camera,
+                    buffer: camera_buffer,
+                    uniform: camera_uniform,
                 };
 
                 let camera_controller = CameraController {
@@ -816,7 +972,7 @@ impl<'a> ApplicationHandler for AppState<'a> {
                     entries: &[
                         wgpu::BindGroupEntry {
                             binding: 0,
-                            resource: camera_go.camera_buffer.as_entire_binding(),
+                            resource: camera_go.buffer.as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,
@@ -845,7 +1001,31 @@ impl<'a> ApplicationHandler for AppState<'a> {
                     layout: &camera_bind_group_layout,
                     entries: &[wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: camera_go.camera_buffer.as_entire_binding(),
+                        resource: camera_go.buffer.as_entire_binding(),
+                    }],
+                });
+
+                let centre_bind_group_layout =
+                    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                        label: Some("centre"),
+                        entries: &[wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::all(),
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        }],
+                    });
+                
+                let centre_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("centre"),
+                    layout: &centre_bind_group_layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: todo!(),
                     }],
                 });
 
@@ -869,6 +1049,7 @@ impl<'a> ApplicationHandler for AppState<'a> {
                 let render_pipeline_layout =
                     device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                         label: Some("render_pipeline_layout"),
+                        // bind_group_layouts: &[&screen_bind_group_layout, &camera_bind_group_layout],
                         bind_group_layouts: &[&screen_bind_group_layout, &camera_bind_group_layout],
                         push_constant_ranges: &[],
                     });
@@ -924,7 +1105,6 @@ impl<'a> ApplicationHandler for AppState<'a> {
                     render_pipeline,
                     size,
                     screen_bind_group,
-                    screen_buffer,
                     bind_group_1,
                     donut,
                     camera_bind_group,
@@ -961,6 +1141,7 @@ impl<'a> ApplicationHandler for AppState<'a> {
                     ..
                 } => event_loop.exit(),
                 WindowEvent::RedrawRequested => {
+                    app.update_graphics_state();
                     match app.render() {
                         Ok(_) => {}
                         Err(wgpu::SurfaceError::Lost) => app.resize(app.size),
