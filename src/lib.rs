@@ -69,6 +69,132 @@ macro_rules! repeat {
     }
 }
 
+macro_rules! bck {
+    // initialize
+    {
+        ()
+        $($stuff:tt)*
+    } => {
+        bck ! {
+            (((TOP NIL)))
+            $($stuff)*
+        }
+    };
+
+    // remainder
+    {
+        (($proc:tt $($rem:tt)*) $($st:tt)*)
+        $($stuff:tt)*
+    } => {
+        bck ! {
+            (($proc) $($st)*)
+            $($stuff)*
+            $($rem)*
+        }
+    };
+
+    // nothing to process, TOP
+    {
+        (((TOP NIL $($v:tt)*)))
+    } => {
+        $($v)*
+    };
+
+    // nothing to process, OP
+    {
+        (((OP $op:ident $($v:tt)*)) $($st:tt)*)
+    } => {
+        $op ! {
+            ($($st)*)
+            $($v)*
+        }
+    };
+
+    // nothing to process, DELIM {}
+    {
+        (((DELIM {} $($v:tt)*)) (($($w:tt)*) $($r:tt)*) $($st:tt)*)
+    } => {
+        bck ! {
+            ((($($w)* {$($v)*}) $($r)*) $($st)*)
+        }
+    };
+
+    // nothing to process, DELIM []
+    {
+        (((DELIM [] $($v:tt)*)) (($($w:tt)*) $($r:tt)*) $($st:tt)*)
+    } => {
+        bck ! {
+            ((($($w)* [$($v)*]) $($r)*) $($st)*)
+        }
+    };
+
+    // nothing to process, DELIM ()
+    {
+        (((DELIM () $($v:tt)*)) (($($w:tt)*) $($r:tt)*) $($st:tt)*)
+    } => {
+        bck ! {
+            ((($($w)* ($($v)*)) $($r)*) $($st)*)
+        }
+    };
+
+    // OP to process
+    {
+        (($proc:tt) $($st:tt)*)
+        $op:ident ! {$($arg:tt)*} $($more:tt)*
+    } => {
+        bck ! {
+            (((OP $op)) ($proc $($more)*) $($st)*)
+            $($arg)*
+        }
+    };
+
+    // DELIM to process, {}
+    {
+        (($proc:tt) $($st:tt)*)
+        {$($body:tt)*} $($more:tt)*
+    } => {
+        bck ! {
+            (((DELIM {})) ($proc $($more)*) $($st)*)
+            $($body)*
+        }
+    };
+
+    // DELIM to process, []
+    {
+        (($proc:tt) $($st:tt)*)
+        [$($body:tt)*] $($more:tt)*
+    } => {
+        bck ! {
+            (((DELIM [])) ($proc $($more)*) $($st)*)
+            $($body)*
+        }
+    };
+
+    // DELIM to process, ()
+    {
+        (($proc:tt) $($st:tt)*)
+        ($($body:tt)*) $($more:tt)*
+    } => {
+        bck ! {
+            (((DELIM ())) ($proc $($more)*) $($st)*)
+            $($body)*
+        }
+    };
+
+    // Dud token to process
+    {
+        ((($($v:tt)*)) $($st:tt)*)
+        $x:tt $($rest:tt)*
+    } => {
+        bck ! {
+            ((($($vv)* $x)) $($st)*)
+            $($rest)*
+        }
+    };
+}
+
+// I think the 'arg' in the original CK machine may have helped distinguish
+// whether we still have some processing to do on the immediate following token.
 macro_rules! ck {
 
     // initialize
@@ -82,7 +208,7 @@ macro_rules! ck {
         }
     };
 
-    // improper stack, anything to process => proper stack, anything + remainder to process
+    // improper stack, anything to process => proper stack, remainder to process
     {
         ((($x:ident $h:tt $($v:tt)*) $($rem:tt)+) $($se:tt)*)
         $($stuff:tt)*
@@ -112,6 +238,13 @@ macro_rules! ck {
     };
 
     // missing proper delimiter stack, nothing to process.
+    {
+        (((DELIM {} $($v1:tt)*)) (($x:ident $h:tt $($v2:tt)*) $($rem:tt)*) $($se:tt)*)
+    } => {
+        ck ! {
+            (((DELIM {} $($v1:tt)*)) (($x:ident $h:tt $($v2:tt)*) $($rem:tt)*) $($se:tt)*)
+        }
+    };
 
     // proper nonempty general stack, op and remainder to process => push op, preserve remainder, recurse into body
     {
