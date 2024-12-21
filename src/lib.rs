@@ -1,3 +1,7 @@
+#![feature(trace_macros)]
+#![recursion_limit = "512"]
+trace_macros!(true);
+
 mod tensor;
 
 use autodiff::{Float, FT};
@@ -63,6 +67,14 @@ struct Camera {
     yfov: f32,
 }
 
+#[derive(Debug, ShaderType)]
+struct Blamera {
+    frame: Matrix3<f32>,
+    centre: Vector3<f32>,
+    ambient_index: u32,
+    yfov: f32,
+}
+
 macro_rules! repeat {
     ($e:tt, $($x:tt),*) => {
         $($e ! $x;)*
@@ -81,15 +93,15 @@ macro_rules! bck {
         }
     };
 
-    // remainder
+    // nonempty remainder
     {
-        (($proc:tt $($rem:tt)*) $($st:tt)*)
+        (($proc:tt $($rem:tt)+) $($st:tt)*)
         $($stuff:tt)*
     } => {
         bck ! {
             (($proc) $($st)*)
             $($stuff)*
-            $($rem)*
+            $($rem)+
         }
     };
 
@@ -187,97 +199,19 @@ macro_rules! bck {
         $x:tt $($rest:tt)*
     } => {
         bck ! {
-            ((($($vv)* $x)) $($st)*)
+            ((($($v)* $x)) $($st)*)
             $($rest)*
         }
     };
 }
 
-// I think the 'arg' in the original CK machine may have helped distinguish
-// whether we still have some processing to do on the immediate following token.
-macro_rules! ck {
-
-    // initialize
-    {
-        ()
-        $($stuff:tt)*
-    } => {
-        ck ! {
-            (((TOP NIL)))
-            $($stuff)*
-        }
-    };
-
-    // improper stack, anything to process => proper stack, remainder to process
-    {
-        ((($x:ident $h:tt $($v:tt)*) $($rem:tt)+) $($se:tt)*)
-        $($stuff:tt)*
-    } => {
-        ck ! {
-            ((($x $h $($v)*)) $($se)*)
-            $($stuff)*
-            $($rem)+
-        }
-    };
-
-    // proper op stack, nothing to process => application
-    {
-        (((OP $h:tt $($v:tt)*)) $($se:tt)*)
-    } => {
-        $h ! {
-            ($($se)*)
-            $($v)*
-        }
-    };
-
-    // proper top stack, nothing to process => return
-    {
-        (((TOP NIL $($v:tt)*)))
-    } => {
-        $($v)*
-    };
-
-    // missing proper delimiter stack, nothing to process.
-    {
-        (((DELIM {} $($v1:tt)*)) (($x:ident $h:tt $($v2:tt)*) $($rem:tt)*) $($se:tt)*)
-    } => {
-        ck ! {
-            (((DELIM {} $($v1:tt)*)) (($x:ident $h:tt $($v2:tt)*) $($rem:tt)*) $($se:tt)*)
-        }
-    };
-
-    // proper nonempty general stack, op and remainder to process => push op, preserve remainder, recurse into body
-    {
-        ((($x:ident $h:tt $($v:tt)*)) $($se:tt)*)
-        $op:tt ! {$($body:tt)*}
-        $($rem:tt)*
-    } => {
-        ck ! {
-            (((OP $op)) (($x $h $($v)*) $($rem)*) $($se)*)
-            $($body)*
-        }
-    };
-
-    // proper nonempty general stack, non-op to process => pull in value, step forward in body
-    {
-        ((($x:ident $h:tt $($v:tt)*)) $($se:tt)*)
-        $step:tt
-        $($stuff:tt)*
-    } => {
-        ck ! {
-            ((($x $h $($v)* $step)) $($se)*)
-            $($stuff)*
-        }
-    };
-}
-
-macro_rules! ck_goose {
+macro_rules! bck_goose {
     {
         $s:tt
         $e:tt
         $t:tt
     } => {
-        ck ! {
+        bck ! {
             $s
             struct $e {
                 pub obj: $t,
@@ -299,23 +233,43 @@ macro_rules! ck_goose {
     }
 }
 
-macro_rules! ck_map {
+macro_rules! bck_map {
     {
         $s:tt
         $m:tt
         {$($e:tt)*}
     } => {
-        ck ! {
+        bck ! {
             $s
             $($m ! $e)*
         }
     }
 }
 
-ck! {
-    ()
-    ck_goose! {CameraGraphicsObject Camera}
+macro_rules! bck_dumb_list {
+    {
+        $s:tt
+    } => {
+        bck ! {
+            $s
+            {CameraGraphicsObject Camera}
+            {BlameraGraphicsObject Blamera}
+        }
+    }
 }
+
+bck! {
+    ()
+    bck_map! {
+        bck_goose
+        {bck_dumb_list!{}}
+    }
+}
+
+// bck! {
+//     ()
+//     bck_goose! {CameraGraphicsObject Camera}
+// }
 
 macro_rules! goose {
     ($e:ident, $t:ty) => {
