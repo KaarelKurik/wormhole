@@ -388,12 +388,12 @@ fn parallel_transport_camera(
 }
 
 impl PointController {
-    fn update_point(&mut self, point: &mut Vector3<f32>, dt: Duration) {
+    fn update_point(&mut self, point: &mut Vector4<f32>, dt: Duration) {
         const LINEAR_SPEED: f32 = 0.5f32;
-        let mut linvel = Vector3::<f32>::zero();
-        let z_linvel = LINEAR_SPEED * Vector3::unit_z();
-        let x_linvel = LINEAR_SPEED * Vector3::unit_x();
-        let y_linvel = LINEAR_SPEED * Vector3::unit_y();
+        let mut linvel = Vector4::<f32>::zero();
+        let z_linvel = LINEAR_SPEED * Vector4::unit_z();
+        let x_linvel = LINEAR_SPEED * Vector4::unit_x();
+        let y_linvel = LINEAR_SPEED * Vector4::unit_y();
 
         if self.u_state.is_pressed() {
             linvel -= z_linvel;
@@ -581,6 +581,7 @@ struct App<'a> {
     screen_size_uniform: wgpu::Buffer,
     graphics_objects: GraphicsObjects,
     camera_controller: CameraController,
+    point_controller: PointController,
     fixed_time: Instant,
     mouse_capture_mode: CursorGrabMode,
     cursor_is_visible: bool,
@@ -664,6 +665,7 @@ impl<'a> App<'a> {
         // we're passing too much in
         // TODO: refactor this
         self.camera_controller.process_window_event(event);
+        self.point_controller.process_window_event(event);
         match event {
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
@@ -701,6 +703,8 @@ impl<'a> App<'a> {
         let dt = new_time.duration_since(self.fixed_time);
         self.camera_controller
             .update_camera(&mut self.graphics_objects.camera.obj, dt);
+        self.point_controller
+            .update_point(&mut self.graphics_objects.centre.obj, dt);
 
         // Write all deferrable logic (not rendering) changes.
         // Maybe I should have wrapper logic just to set a bit telling me whether
@@ -887,6 +891,15 @@ impl<'a> ApplicationHandler for AppState<'a> {
                     d_state: ElementState::Released,
                 };
 
+                let point_controller = PointController {
+                    u_state: ElementState::Released,
+                    o_state: ElementState::Released,
+                    i_state: ElementState::Released,
+                    m_state: ElementState::Released,
+                    j_state: ElementState::Released,
+                    l_state: ElementState::Released,
+                };
+
                 fn maker<T : ShaderType + WriteInto>(device: &wgpu::Device, bonk: T) -> UniformGraphicsObject<T> {
                     let mut uniform = UniformBuffer::new(Vec::<u8>::new());
                     uniform.write(&bonk).unwrap();
@@ -1012,6 +1025,7 @@ impl<'a> ApplicationHandler for AppState<'a> {
                     screen_bind_group,
                     screen_size_uniform,
                     camera_controller,
+                    point_controller,
                     fixed_time,
                     mouse_capture_mode,
                     cursor_is_visible,
