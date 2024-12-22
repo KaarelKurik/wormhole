@@ -206,9 +206,12 @@ float3 sphere_sect(float3 centre, TR3 ray) {
     let c = dot(ray.v, ray.v);
     let disc = b * b - c * (a - 1.0);
     if (disc < 0) {
-        return 0;
+        return centre;
     }
     let l = (-b - sqrt(disc)) / c;
+    if (l < 0) {
+        return centre;
+    }
     return q + l * ray.v + centre;
 }
 
@@ -237,11 +240,10 @@ float4 fragment(float4 in: SV_Position)
 {
     let pixel = uint2(in.xy);
     let ray = pixel_to_camera_ray(pixel);
-    let lambda = -(dot(ray.q, ray.v)) / dot(ray.v, ray.v);
-    let nearest = ray.q + lambda * ray.v;
-    let intensity = proj_ray_to_sphere_grid(ray.v);
-    if (length(nearest) <= 1.0 && lambda > 0) {
-        return float4(sphere_sect(sphereCenter.xyz, ray), 1.0);
+    let sect = sphere_sect(sphereCenter.xyz, ray);
+    if (length(sect - sphereCenter.xyz) > 0.5) {
+        return float4(sect - sphereCenter.xyz, 1.0);
     }
+    let intensity = proj_ray_to_sphere_grid(ray.v);
     return float4(intensity, intensity, intensity, 1.0);
 }
