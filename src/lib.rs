@@ -6,9 +6,10 @@ mod tensor;
 
 use autodiff::{Float, FT};
 use cgmath::{
-    Array, InnerSpace, Matrix, Matrix3, Matrix4, Rad, SquareMatrix, Vector2, Vector3, Zero,
+    num_traits::zero, Array, InnerSpace, Matrix, Matrix3, Matrix4, Rad, SquareMatrix, Vector2,
+    Vector3, Vector4, Zero,
 };
-use encase::{ArrayLength, ShaderType, StorageBuffer, UniformBuffer};
+use encase::{internal::WriteInto, ArrayLength, ShaderType, StorageBuffer, UniformBuffer};
 use std::{
     f32::consts::PI,
     ops::{Deref, DerefMut},
@@ -65,20 +66,6 @@ struct Camera {
     centre: Vector3<f32>,
     ambient_index: u32,
     yfov: f32,
-}
-
-#[derive(Debug, ShaderType)]
-struct Blamera {
-    frame: Matrix3<f32>,
-    centre: Vector3<f32>,
-    ambient_index: u32,
-    yfov: f32,
-}
-
-macro_rules! repeat {
-    ($e:tt, $($x:tt),*) => {
-        $($e ! $x;)*
-    }
 }
 
 macro_rules! bck {
@@ -205,33 +192,6 @@ macro_rules! bck {
     };
 }
 
-macro_rules! bck_goose {
-    {
-        $s:tt
-        $e:tt
-        $t:tt
-    } => {
-        bck ! {
-            $s
-            struct $e {
-                pub obj: $t,
-                buffer: wgpu::Buffer,
-                uniform: UniformBuffer<Vec<u8>>,
-            }
-    
-            impl $e {
-                fn write_changes(&mut self, q: &mut wgpu::Queue) {
-                    self.uniform.write(&self.obj).unwrap();
-                    q.write_buffer(
-                        &self.buffer,
-                        0,
-                        self.uniform.as_ref().as_slice(),
-                    );
-                }
-            }
-        }
-    }
-}
 
 macro_rules! bck_map {
     {
@@ -246,86 +206,24 @@ macro_rules! bck_map {
     }
 }
 
-macro_rules! bck_dumb_list {
-    {
-        $s:tt
-    } => {
-        bck ! {
-            $s
-            {CameraGraphicsObject Camera}
-            {BlameraGraphicsObject Blamera}
-        }
+struct UniformGraphicsObject<T: ShaderType> {
+    obj: T,
+    uniform: UniformBuffer<Vec<u8>>,
+    buffer: wgpu::Buffer,
+    bind_group_layout: wgpu::BindGroupLayout,
+    bind_group: wgpu::BindGroup,
+}
+
+impl<T : ShaderType + WriteInto> UniformGraphicsObject<T> {
+    fn write_changes(&mut self, q: &mut wgpu::Queue) {
+        self.uniform.write(&self.obj).unwrap();
+        q.write_buffer(
+            &self.buffer,
+            0,
+            self.uniform.as_ref().as_slice(),
+        );
     }
 }
-
-bck! {
-    ()
-    bck_map! {
-        bck_goose
-        {bck_dumb_list!{}}
-    }
-}
-
-// bck! {
-//     ()
-//     bck_goose! {CameraGraphicsObject Camera}
-// }
-
-macro_rules! goose {
-    ($e:ident, $t:ty) => {
-        struct $e {
-            pub obj: $t,
-            buffer: wgpu::Buffer,
-            uniform: UniformBuffer<Vec<u8>>,
-        }
-
-        impl $e {
-            fn write_changes(&mut self, q: &mut wgpu::Queue) {
-                self.uniform.write(&self.obj).unwrap();
-                q.write_buffer(
-                    &self.buffer,
-                    0,
-                    self.uniform.as_ref().as_slice(),
-                );
-            }
-        }
-    };
-}
-
-macro_rules! good_goose {
-    {
-        $caller:tt
-        easy = [{ $e:ident }]
-        peasy = [{ $t:ty }]
-    } => {
-        goose!($e, $t);
-    }
-}
-
-// tt_call! {
-//     macro = [{ good_goose }]
-//     easy = [{ CameraGraphicsObject }]
-//     peasy = [{ Camera }]
-// }
-
-
-
-// struct CameraGraphicsObject {
-//     pub camera: Camera,
-//     camera_buffer: wgpu::Buffer,
-//     camera_uniform: UniformBuffer<Vec<u8>>,
-// }
-
-// impl CameraGraphicsObject {
-//     fn write_changes(&mut self, q: &mut wgpu::Queue) {
-//         self.camera_uniform.write(&self.camera).unwrap();
-//         q.write_buffer(
-//             &self.camera_buffer,
-//             0,
-//             self.camera_uniform.as_ref().as_slice(),
-//         );
-//     }
-// }
 
 struct CameraController {
     q_state: ElementState,
@@ -545,7 +443,7 @@ impl PointController {
 
 impl CameraController {
     // TODO: modify this to use the metric
-    fn update_camera(&mut self, donut: &EllisDonut, camera: &mut Camera, dt: Duration) {
+    fn update_camera(&mut self, camera: &mut Camera, dt: Duration) {
         const ANGULAR_SPEED: f32 = 1f32;
         const LINEAR_SPEED: f32 = 8f32;
         let dt_seconds = dt.as_secs_f32();
@@ -646,6 +544,31 @@ enum AppState<'a> {
     Initialized(App<'a>),
 }
 
+macro_rules! bck_name_type {
+    {$s:tt} => {
+        bck! {
+            $s
+            {(camera : Camera) (centre : Vector4<f32>)}
+        }
+    };
+}
+
+macro_rules! bck_graphics_objects {
+    {
+        $s:tt
+        {$(($x:ident : $t:ty))*}
+    } => {
+        bck! {
+            $s
+            struct GraphicsObjects {
+                $($x : UniformGraphicsObject<$t>),*
+            }
+        }
+    };
+}
+
+bck! {() bck_graphics_objects! {bck_name_type!{}}}
+
 struct App<'a> {
     window: Arc<Window>,
     size: PhysicalSize<u32>,
@@ -653,14 +576,10 @@ struct App<'a> {
     surface_config: wgpu::SurfaceConfiguration,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    compute_pipeline: wgpu::ComputePipeline,
     render_pipeline: wgpu::RenderPipeline,
     screen_bind_group: wgpu::BindGroup,
-    bind_group_1: wgpu::BindGroup,
-    donut: EllisDonut,
-    camera_bind_group: wgpu::BindGroup,
     screen_size_uniform: wgpu::Buffer,
-    camera_go: CameraGraphicsObject,
+    graphics_objects: GraphicsObjects,
     camera_controller: CameraController,
     fixed_time: Instant,
     mouse_capture_mode: CursorGrabMode,
@@ -700,7 +619,8 @@ impl<'a> App<'a> {
             });
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(0, &self.screen_bind_group, &[]);
-            render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
+            render_pass.set_bind_group(1, &self.graphics_objects.camera.bind_group, &[]);
+            render_pass.set_bind_group(2, &self.graphics_objects.centre.bind_group, &[]);
             render_pass.draw(0..3, 0..1);
         }
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -758,14 +678,19 @@ impl<'a> App<'a> {
             CursorGrabMode::Confined | CursorGrabMode::Locked => {
                 if let DeviceEvent::MouseMotion { delta } = event {
                     self.camera_controller
-                        .process_mouse_motion(&mut self.camera_go.obj, delta);
+                        .process_mouse_motion(&mut self.graphics_objects.camera.obj, delta);
                 }
             }
             _ => {}
         }
     }
     fn update_graphics_state(&mut self) {
-        self.camera_go.write_changes(&mut self.queue);
+        macro_rules! bck_write_changes {
+            {$s:tt {$(($x:ident : $t:ty))*}} => {
+                $(self.graphics_objects.$x.write_changes(&mut self.queue));*
+            };
+        }
+        bck!{() bck_write_changes!{bck_name_type!{}}}
         self.queue.write_buffer(
             &self.screen_size_uniform,
             0,
@@ -775,7 +700,7 @@ impl<'a> App<'a> {
     fn update_logic_state(&mut self, new_time: Instant) {
         let dt = new_time.duration_since(self.fixed_time);
         self.camera_controller
-            .update_camera(&self.donut, &mut self.camera_go.obj, dt);
+            .update_camera(&mut self.graphics_objects.camera.obj, dt);
 
         // Write all deferrable logic (not rendering) changes.
         // Maybe I should have wrapper logic just to set a bit telling me whether
@@ -833,6 +758,7 @@ impl<'a> ApplicationHandler for AppState<'a> {
                 let supported_presentation_modes = surface_caps.present_modes;
 
                 let mode_comparator = |pres_mode: &&wgpu::PresentMode| match pres_mode {
+                    wgpu::PresentMode::Immediate => -1, // my machine freezes every few secs with vsync now - not sure why
                     wgpu::PresentMode::Mailbox => 0,
                     wgpu::PresentMode::FifoRelaxed => 1,
                     wgpu::PresentMode::Fifo => 2,
@@ -952,54 +878,6 @@ impl<'a> ApplicationHandler for AppState<'a> {
                     ],
                 });
 
-                let bind_group_1_layout =
-                    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                        label: Some("bind_group_1"),
-                        entries: &[
-                            wgpu::BindGroupLayoutEntry {
-                                binding: 0,
-                                visibility: wgpu::ShaderStages::COMPUTE,
-                                ty: wgpu::BindingType::Buffer {
-                                    ty: wgpu::BufferBindingType::Uniform,
-                                    has_dynamic_offset: false,
-                                    min_binding_size: None,
-                                },
-                                count: None,
-                            },
-                            wgpu::BindGroupLayoutEntry {
-                                binding: 1,
-                                visibility: wgpu::ShaderStages::COMPUTE,
-                                ty: wgpu::BindingType::Buffer {
-                                    ty: wgpu::BufferBindingType::Storage { read_only: true },
-                                    has_dynamic_offset: false,
-                                    min_binding_size: None,
-                                },
-                                count: None,
-                            },
-                        ],
-                    });
-
-                let camera = Camera {
-                    frame: Matrix3::from_diagonal(Vector3::new(1.0, 1.0, -1.0)),
-                    centre: Vector3::new(0.0, 0.0, 5.0),
-                    ambient_index: 0,
-                    yfov: PI / 2.,
-                };
-
-                let mut camera_uniform = UniformBuffer::new(Vec::<u8>::new());
-                camera_uniform.write(&camera).unwrap();
-                let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("camera_buffer"),
-                    contents: camera_uniform.as_ref().as_slice(),
-                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                });
-
-                let camera_go = CameraGraphicsObject {
-                    obj: camera,
-                    buffer: camera_buffer,
-                    uniform: camera_uniform,
-                };
-
                 let camera_controller = CameraController {
                     q_state: ElementState::Released,
                     e_state: ElementState::Released,
@@ -1009,67 +887,15 @@ impl<'a> ApplicationHandler for AppState<'a> {
                     d_state: ElementState::Released,
                 };
 
-                let donut = EllisDonut {
-                    radius: 1.0,
-                    wedge: 0.1,
-                };
-
-                let toruses = Toruses {
-                    torus_count: ArrayLength,
-                    torus_array: vec![
-                        TorusThroat {
-                            ambient_index: 0,
-                            opposite_index: 1,
-                            major_radius: 3.0,
-                            inner_minor_radius: 1.0,
-                            outer_minor_radius: 2.0,
-                            to_ambient_transform: Matrix4::identity(),
-                            to_local_transform: Matrix4::identity(),
-                        },
-                        TorusThroat {
-                            ambient_index: 1,
-                            opposite_index: 0,
-                            major_radius: 3.0,
-                            inner_minor_radius: 1.0,
-                            outer_minor_radius: 2.0,
-                            to_ambient_transform: Matrix4::from_translation(
-                                16.0f32 * Vector3::unit_x(),
-                            ),
-                            to_local_transform: Matrix4::from_translation(
-                                -16.0f32 * Vector3::unit_x(),
-                            ),
-                        },
-                    ],
-                };
-
-                let torus_buffer = {
-                    let mut _torus_buffer = StorageBuffer::new(Vec::<u8>::new());
-                    _torus_buffer.write(&toruses).unwrap();
-
-                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("torus_buffer"),
-                        contents: _torus_buffer.into_inner().as_slice(),
-                        usage: wgpu::BufferUsages::STORAGE,
-                    })
-                };
-
-                let bind_group_1 = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("bind_group_1"),
-                    layout: &bind_group_1_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: camera_go.buffer.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: torus_buffer.as_entire_binding(),
-                        },
-                    ],
-                });
-
-                let camera_bind_group_layout =
-                    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                fn maker<T : ShaderType + WriteInto>(device: &wgpu::Device, bonk: T) -> UniformGraphicsObject<T> {
+                    let mut uniform = UniformBuffer::new(Vec::<u8>::new());
+                    uniform.write(&bonk).unwrap();
+                    let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: None,
+                        contents: uniform.as_ref().as_slice(),
+                        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    });
+                    let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                         label: None,
                         entries: &[wgpu::BindGroupLayoutEntry {
                             binding: 0,
@@ -1082,62 +908,55 @@ impl<'a> ApplicationHandler for AppState<'a> {
                             count: None,
                         }],
                     });
-
-                let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("camera_bind_group"),
-                    layout: &camera_bind_group_layout,
-                    entries: &[wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: camera_go.buffer.as_entire_binding(),
-                    }],
-                });
-
-                let centre_bind_group_layout =
-                    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                        label: Some("centre"),
-                        entries: &[wgpu::BindGroupLayoutEntry {
+                    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: None,
+                        layout: &bgl,
+                        entries: &[wgpu::BindGroupEntry {
                             binding: 0,
-                            visibility: wgpu::ShaderStages::all(),
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Uniform,
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
+                            resource: buffer.as_entire_binding(),
                         }],
                     });
-                
-                let centre_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("centre"),
-                    layout: &centre_bind_group_layout,
-                    entries: &[wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: todo!(),
-                    }],
-                });
+                    UniformGraphicsObject::<T> {
+                        obj: bonk,
+                        uniform,
+                        buffer,
+                        bind_group_layout: bgl,
+                        bind_group: bg,
+                    }
+                }
 
-                let compute_pipeline_layout =
-                    device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                        label: Some("compute_pipeline_layout"),
-                        bind_group_layouts: &[&screen_bind_group_layout, &bind_group_1_layout],
-                        push_constant_ranges: &[],
-                    });
+                let camera = Camera {
+                    frame: Matrix3::from_diagonal(Vector3::new(1.0, 1.0, -1.0)),
+                    centre: Vector3::new(0.0, 0.0, 5.0),
+                    ambient_index: 0,
+                    yfov: PI / 2.,
+                };
+                let camera_go = maker(&device, camera);
 
-                let compute_pipeline =
-                    device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                        label: Some("compute_pipeline"),
-                        layout: Some(&compute_pipeline_layout),
-                        module: &shader,
-                        entry_point: Some("main"),
-                        compilation_options: Default::default(),
-                        cache: None,
-                    });
+                let centre = Vector4::<f32>::zero();
+                let centre_go = maker(&device, centre);
+
+                let graphics_objects = GraphicsObjects {
+                    camera: camera_go,
+                    centre: centre_go,
+                };
+
+                macro_rules! bck_whatever {
+                    {$s:tt {$(($x:ident : $t:ty))*}} => {
+                        bck! {
+                            $s
+                            &[
+                                &screen_bind_group_layout,
+                                $(&graphics_objects.$x.bind_group_layout),*
+                            ]
+                        }
+                    };
+                }
 
                 let render_pipeline_layout =
                     device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                         label: Some("render_pipeline_layout"),
-                        // bind_group_layouts: &[&screen_bind_group_layout, &camera_bind_group_layout],
-                        bind_group_layouts: &[&screen_bind_group_layout, &camera_bind_group_layout],
+                        bind_group_layouts: bck!{() bck_whatever!{bck_name_type!{}}},
                         push_constant_ranges: &[],
                     });
 
@@ -1188,19 +1007,15 @@ impl<'a> ApplicationHandler for AppState<'a> {
                     surface_config,
                     device,
                     queue,
-                    compute_pipeline,
                     render_pipeline,
                     size,
                     screen_bind_group,
-                    bind_group_1,
-                    donut,
-                    camera_bind_group,
                     screen_size_uniform,
-                    camera_go,
                     camera_controller,
                     fixed_time,
                     mouse_capture_mode,
                     cursor_is_visible,
+                    graphics_objects
                 };
                 *self = Self::Initialized(app);
             }

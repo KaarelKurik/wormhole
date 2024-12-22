@@ -140,7 +140,7 @@ struct Torus : Sdf {
 }
 
 [[vk::binding(0,2)]]
-ParameterBlock<float3> sphereCenter; 
+ParameterBlock<float4> sphereCenter; 
 
 StructuredBuffer<Torus> toruses;
 
@@ -241,7 +241,7 @@ float4 fragment(float4 in: SV_Position)
     let nearest = ray.q + lambda * ray.v;
     let intensity = proj_ray_to_sphere_grid(ray.v);
     if (length(nearest) <= 1.0 && lambda > 0) {
-        return float4(sphere_sect(sphereCenter, ray), 1.0);
+        return float4(sphere_sect(sphereCenter.xyz, ray), 1.0);
     }
     return float4(intensity, intensity, intensity, 1.0);
 }
