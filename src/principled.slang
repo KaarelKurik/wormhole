@@ -81,6 +81,11 @@
 // Ideally (x+1)^2(g'(x))^2 - 1 has no roots, but the problem is that due to the limiting
 // behavior of (g'), if g' is continuous, a root is guaranteed.
 
+// Glossary:
+// gtl: global to local
+// ltg: local to global
+// sdf: signed distance function (not strictly applied to distance functions, analogues accepted)
+
 struct TR3
 {
     uint ambient_index;
@@ -122,27 +127,48 @@ interface MetricChart
 }
 
 [Differentiable]
-float torus_sdf(no_diff float R, no_diff float r, float3 x) {
-    let xr = length(x.xy) - R;
-    let xh = sqrt(xr * xr + x.z * x.z);
+float torus_sdf(no_diff float R, no_diff float r, no_diff float4x4 gtl, float3 gx) {
+    let lx = mul(gtl, float4(gx, 1.0));
+    let xr = length(lx.xy) - R;
+    let xh = sqrt(xr * xr + lx.z * lx.z);
     return xh - r;
 }
 
 struct Torus : Sdf {
     float R;
     float r;
+    float4x4 gtl;
     float sdf(float3 x) {
-        return torus_sdf(R, r, x);
+        return torus_sdf(R, r, gtl, x);
     }
     void sdfBackProp(inout DifferentialPair<float3> x, float dResult) {
-        bwd_diff(torus_sdf)(R, r, x, dResult);
+        bwd_diff(torus_sdf)(R, r, gtl, x, dResult);
     }
 }
 
 [[vk::binding(0,2)]]
 ParameterBlock<float4> sphereCenter; 
 
-StructuredBuffer<Torus> toruses;
+// StructuredBuffer<Torus> toruses;
+
+static const Torus torus = Torus(2.0, 1.0, {{1.0, 0.0, 0.0, 0.0}, {0.0, 1.0, 0.0, 0.0}, {0.0, 0.0, 1.0, 0.0}, {0.0, 0.0, 0.0, 1.0}});
+static float3 point_projection = float3(0.0);
+
+float3 projectOntoZero(float3 x) {
+    let KSTEPS = 10;
+    let sdf_obj = torus;
+    var lambda : float = 0.0;
+    // We're going to rescale our pullback so we get a vector instead of a covector
+    // Just divide it by square norm
+    var yPair : DifferentialPair<float3> = diffPair(x, 0);
+    sdf_obj.sdfBackProp(yPair, 1.0);
+    for (int k = 0; k < KSTEPS; ++k) {
+        yPair = diffPair(x - lambda * yPair.d, yPair.d);
+        sdf_obj.sdfBackProp(yPair, rcp(dot(yPair.d, yPair.d)));
+        lambda += sdf_obj.sdf(yPair.v);
+    }
+    return yPair.v;
+}
 
 
 float pbump(float n, float x)
@@ -199,12 +225,12 @@ TR3 pixel_to_camera_ray(uint2 pixel_coords)
 //     }
 // }
 
-float3 sphere_sect(float3 centre, TR3 ray) {
+float3 sphere_sect(float3 centre, float radius, TR3 ray) {
     let q = ray.q - centre;
     let a = dot(q, q);
     let b = dot(q, ray.v);
     let c = dot(ray.v, ray.v);
-    let disc = b * b - c * (a - 1.0);
+    let disc = b * b - c * (a - radius * radius);
     if (disc < 0) {
         return centre;
     }
@@ -240,9 +266,16 @@ float4 fragment(float4 in: SV_Position)
 {
     let pixel = uint2(in.xy);
     let ray = pixel_to_camera_ray(pixel);
-    let sect = sphere_sect(sphereCenter.xyz, ray);
-    if (length(sect - sphereCenter.xyz) > 0.5) {
-        return float4(sect - sphereCenter.xyz, 1.0);
+    let radius = 0.1;
+    let proj_radius = 0.2;
+    point_projection = projectOntoZero(sphereCenter.xyz);
+    let sect = sphere_sect(sphereCenter.xyz, radius, ray);
+    let proj_sect = sphere_sect(point_projection, proj_radius, ray);
+    if (length(sect - sphereCenter.xyz) > 0.5 * radius) {
+        return float4(normalize(sect - sphereCenter.xyz), 1.0);
+    }
+    if (length(proj_sect - point_projection) > 0.5 * proj_radius) {
+        return float4(1.0);
     }
     let intensity = proj_ray_to_sphere_grid(ray.v);
     return float4(intensity, intensity, intensity, 1.0);

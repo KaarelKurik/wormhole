@@ -954,7 +954,7 @@ impl<'a> ApplicationHandler for AppState<'a> {
                     centre: centre_go,
                 };
 
-                macro_rules! bck_whatever {
+                macro_rules! bck_bind_group_layouts {
                     {$s:tt {$(($x:ident : $t:ty))*}} => {
                         bck! {
                             $s
@@ -969,7 +969,7 @@ impl<'a> ApplicationHandler for AppState<'a> {
                 let render_pipeline_layout =
                     device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                         label: Some("render_pipeline_layout"),
-                        bind_group_layouts: bck!{() bck_whatever!{bck_name_type!{}}},
+                        bind_group_layouts: bck!{() bck_bind_group_layouts!{bck_name_type!{}}},
                         push_constant_ranges: &[],
                     });
 
