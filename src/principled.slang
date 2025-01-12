@@ -86,6 +86,11 @@
 // ltg: local to global
 // sdf: signed distance function (not strictly applied to distance functions, analogues accepted)
 
+struct VertexInfo {
+    float3 pos;
+    float3 normal;
+}
+
 struct TR3
 {
     uint ambient_index;
@@ -108,11 +113,12 @@ struct Camera
     float yfov;
 }
 
+// maybe constant buffer instead?
 [[vk::binding(0, 0)]]
-ParameterBlock<Screen> screen;
+ConstantBuffer<Screen> screen;
 
 [[vk::binding(0, 1)]]
-ParameterBlock<Camera> camera;
+ConstantBuffer<Camera> camera;
 
 interface Sdf
 {
@@ -147,7 +153,7 @@ struct Torus : Sdf {
 }
 
 [[vk::binding(0,2)]]
-ParameterBlock<float4> sphereCenter; 
+ConstantBuffer<float4> sphereCenter;
 
 // StructuredBuffer<Torus> toruses;
 
@@ -170,6 +176,72 @@ float3 projectOntoZero(float3 x) {
     return yPair.v;
 }
 
+float wendland(no_diff float h, float x) {
+    if (x > h) {
+        return 0;
+    } else {
+        return powr(1-x/h, 4) * (4*x/h + 1);
+    }
+}
+
+// no idea if this binding trick could work - test it tmrw
+struct SurfaceParams : IDifferentiable {
+    [[vk::binding(0,4)]]
+    StructuredBuffer<VertexInfo> points;
+    [[vk::binding(0,3)]]
+    float support;
+}
+
+ConstantBuffer<SurfaceParams> surface;
+
+VertexInfo local_centroid(no_diff SurfaceParams sp, float3 x) {
+    var unnormed_pos: float3;
+    var unnormed_normal: float3;
+    var total_weight: float;
+    for(int i = 0; i < sp.points.getCount(); ++i) {
+        let weight = wendland(sp.support, length(x - sp.points[i].pos));
+        total_weight += weight;
+        unnormed_pos += weight * sp.points[i].pos;
+        unnormed_normal += weight * sp.points[i].normal;
+    }
+
+    return {
+        unnormed_pos/total_weight,
+        unnormed_normal/total_weight
+    };
+}
+
+[Differentiable]
+float surface_energy(no_diff SurfaceParams sp, float3 x) {
+    let lc = local_centroid(sp, x);
+    return dot(lc.normal, x - lc.pos);
+}
+
+float3 projectOntoPointSetSurface(no_diff SurfaceParams sp, float3 x) {
+    let KSTEPS = 10;
+    var lambda : float = 0.0;
+    // We're going to rescale our pullback so we get a vector instead of a covector
+    // Just divide it by square norm
+    var yPair : DifferentialPair<float3> = diffPair(x, 0);
+    bwd_diff(surface_energy)(sp, yPair, 1.0);
+    for (int k = 0; k < KSTEPS; ++k) {
+        yPair = diffPair(x - lambda * yPair.d, yPair.d);
+        bwd_diff(surface_energy)(sp, yPair, rcp(dot(yPair.d, yPair.d)));
+        lambda += surface_energy(sp, yPair.v);
+    }
+    return yPair.v;
+}
+
+TR3 getToThePoint(no_diff SurfaceParams sp, TR3 ray) {
+    let KSTEPS = 10;
+    var lambda : float = 0.0;
+    var pair = diffPair(ray.q, ray.v);
+    for (int k = 0; k < KSTEPS; ++k) {
+        let outPair = fwd_diff(surface_energy)(sp, pair);
+        pair = diffPair(pair.v - (outPair.v/outPair.d) * pair.d, pair.d);
+    }
+    return TR3(ray.ambient_index, pair.v, pair.d);
+}
 
 float pbump(float n, float x)
 {
@@ -241,6 +313,19 @@ float3 sphere_sect(float3 centre, float radius, TR3 ray) {
     return q + l * ray.v + centre;
 }
 
+// returns color
+float4 vinfo_sect(VertexInfo vi, float radius, TR3 ray) {
+    let sect = sphere_sect(vi.pos, radius, ray);
+    if (all(sect == vi.pos)) {
+        return float4(-1);
+    } else {
+        let diff = sect - vi.pos;
+        let wide_intensity = dot(diff, vi.normal) / (length(diff) * length(vi.normal));
+        let intensity = (wide_intensity + 1.0) / 2.;
+        return float4(float3(intensity), 1.0);
+    }
+}
+
 [shader("compute")]
 [numthreads(16, 16, 1)]
 void compute()
@@ -276,6 +361,12 @@ float4 fragment(float4 in: SV_Position)
     }
     if (length(proj_sect - point_projection) > 0.5 * proj_radius) {
         return float4(1.0);
+    }
+    for (int i = 0; i < surface.points.getCount(); ++i) {
+        let color = vinfo_sect(surface.points[i], 0.1, ray);
+        if (color.w >= 0.0) {
+            return color;
+        }
     }
     let intensity = proj_ray_to_sphere_grid(ray.v);
     return float4(intensity, intensity, intensity, 1.0);

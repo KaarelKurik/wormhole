@@ -6,12 +6,13 @@ mod tensor;
 
 use autodiff::{Float, FT};
 use cgmath::{
-    num_traits::zero, Array, InnerSpace, Matrix, Matrix3, Matrix4, Rad, SquareMatrix, Vector2,
-    Vector3, Vector4, Zero,
+    num_traits::zero, Array, Basis3, InnerSpace, Matrix, Matrix3, Matrix4, Rad, Rotation, Rotation3, SquareMatrix, Vector2, Vector3, Vector4, Zero
 };
-use encase::{internal::WriteInto, ArrayLength, ShaderType, StorageBuffer, UniformBuffer};
+use encase::{
+    impl_rts_array, internal::WriteInto, ArrayLength, ShaderType, StorageBuffer, UniformBuffer,
+};
 use std::{
-    f32::consts::PI,
+    f32::consts::{PI, TAU},
     ops::{Deref, DerefMut},
     sync::Arc,
     time::{Duration, Instant},
@@ -192,7 +193,6 @@ macro_rules! bck {
     };
 }
 
-
 macro_rules! bck_map {
     {
         $s:tt
@@ -214,14 +214,25 @@ struct UniformGraphicsObject<T: ShaderType> {
     bind_group: wgpu::BindGroup,
 }
 
-impl<T : ShaderType + WriteInto> UniformGraphicsObject<T> {
+impl<T: ShaderType + WriteInto> UniformGraphicsObject<T> {
     fn write_changes(&mut self, q: &mut wgpu::Queue) {
         self.uniform.write(&self.obj).unwrap();
-        q.write_buffer(
-            &self.buffer,
-            0,
-            self.uniform.as_ref().as_slice(),
-        );
+        q.write_buffer(&self.buffer, 0, self.uniform.as_ref().as_slice());
+    }
+}
+
+struct StorageGraphicsObject<T: ShaderType> {
+    obj: T,
+    storage: StorageBuffer<Vec<u8>>,
+    buffer: wgpu::Buffer,
+    bind_group_layout: wgpu::BindGroupLayout,
+    bind_group: wgpu::BindGroup,
+}
+
+impl<T: ShaderType + WriteInto> StorageGraphicsObject<T> {
+    fn write_changes(&mut self, q: &mut wgpu::Queue) {
+        self.storage.write(&self.obj).unwrap();
+        q.write_buffer(&self.buffer, 0, self.storage.as_ref().as_slice());
     }
 }
 
@@ -241,6 +252,33 @@ struct PointController {
     m_state: ElementState,
     j_state: ElementState,
     l_state: ElementState,
+}
+
+fn sample_circle(radius: f32, points: u32) -> Vec<Vector2<f32>> {
+    (0..points).map(|ix| {
+        let theta = (ix as f32/points as f32) * TAU;
+        radius * Vector2::new(theta.cos(), theta.sin())
+    }).collect()
+}
+
+fn construct_donut_vertex_info(major_r: f32, minor_r: f32, major_points: u32, minor_points: u32) -> Vec<VertexInfo> {
+    let base_angles: Vec<f32> = (0..major_points).map(|ix| (ix as f32/major_points as f32)*TAU).collect();
+    let main_fiber: Vec<Vector3<f32>> = sample_circle(minor_r, minor_points).iter().map(|v| {
+        Vector3::new(v.x, 0f32, v.y)
+    }).collect();
+    let out = base_angles.into_iter().map(|t| {
+        let base_point = major_r * Vector3::new(t.cos(), t.sin(), 0f32);
+        let rotated_fiber = main_fiber.iter().map(move |p| (Basis3::from_angle_z(Rad(t))).rotate_vector(*p));
+        let translated_fiber = rotated_fiber.clone().map(move |v| base_point + v);
+        let infos = translated_fiber.zip(rotated_fiber).map(|(u,v)| {
+            VertexInfo {
+                pos: u,
+                normal: v,
+            }
+        });
+        infos
+    }).flatten().collect();
+    out
 }
 
 struct EllisDonut {
@@ -539,35 +577,65 @@ struct Toruses {
     torus_array: Vec<TorusThroat>,
 }
 
+#[derive(ShaderType)]
+struct VertexInfo {
+    pos: Vector3<f32>,
+    normal: Vector3<f32>,
+}
+
 enum AppState<'a> {
     Uninitialized(),
     Initialized(App<'a>),
 }
 
-macro_rules! bck_name_type {
+macro_rules! bck_uniform_name_type {
     {$s:tt} => {
         bck! {
             $s
-            {(camera : Camera) (centre : Vector4<f32>)}
+            {(camera : Camera) (centre : Vector4<f32>) (feature_param : f32)}
         }
     };
 }
 
-macro_rules! bck_graphics_objects {
+macro_rules! bck_storage_name_type {
+    {$s:tt} => {
+        bck! {
+            $s
+            {(surface: Vec<VertexInfo>)}
+        }
+    };
+}
+
+macro_rules! bck_uniform_graphics_objects {
     {
         $s:tt
         {$(($x:ident : $t:ty))*}
     } => {
         bck! {
             $s
-            struct GraphicsObjects {
+            struct UniformGraphicsObjects {
                 $($x : UniformGraphicsObject<$t>),*
             }
         }
     };
 }
 
-bck! {() bck_graphics_objects! {bck_name_type!{}}}
+macro_rules! bck_storage_graphics_objects {
+    {
+        $s:tt
+        {$(($x:ident : $t:ty))*}
+    } => {
+        bck! {
+            $s
+            struct StorageGraphicsObjects {
+                $($x : StorageGraphicsObject<$t>),*
+            }
+        }
+    };
+}
+
+bck! {() bck_uniform_graphics_objects! {bck_uniform_name_type!{}}}
+bck! {() bck_storage_graphics_objects! {bck_storage_name_type!{}}}
 
 struct App<'a> {
     window: Arc<Window>,
@@ -579,7 +647,8 @@ struct App<'a> {
     render_pipeline: wgpu::RenderPipeline,
     screen_bind_group: wgpu::BindGroup,
     screen_size_uniform: wgpu::Buffer,
-    graphics_objects: GraphicsObjects,
+    uniform_graphics_objects: UniformGraphicsObjects,
+    storage_graphics_objects: StorageGraphicsObjects,
     camera_controller: CameraController,
     point_controller: PointController,
     fixed_time: Instant,
@@ -620,8 +689,10 @@ impl<'a> App<'a> {
             });
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(0, &self.screen_bind_group, &[]);
-            render_pass.set_bind_group(1, &self.graphics_objects.camera.bind_group, &[]);
-            render_pass.set_bind_group(2, &self.graphics_objects.centre.bind_group, &[]);
+            render_pass.set_bind_group(1, &self.uniform_graphics_objects.camera.bind_group, &[]);
+            render_pass.set_bind_group(2, &self.uniform_graphics_objects.centre.bind_group, &[]);
+            render_pass.set_bind_group(3, &self.uniform_graphics_objects.feature_param.bind_group, &[]);
+            render_pass.set_bind_group(4, &self.storage_graphics_objects.surface.bind_group, &[]);
             render_pass.draw(0..3, 0..1);
         }
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -680,19 +751,25 @@ impl<'a> App<'a> {
             CursorGrabMode::Confined | CursorGrabMode::Locked => {
                 if let DeviceEvent::MouseMotion { delta } = event {
                     self.camera_controller
-                        .process_mouse_motion(&mut self.graphics_objects.camera.obj, delta);
+                        .process_mouse_motion(&mut self.uniform_graphics_objects.camera.obj, delta);
                 }
             }
             _ => {}
         }
     }
     fn update_graphics_state(&mut self) {
-        macro_rules! bck_write_changes {
+        macro_rules! bck_write_uniform_changes {
             {$s:tt {$(($x:ident : $t:ty))*}} => {
-                $(self.graphics_objects.$x.write_changes(&mut self.queue));*
+                $(self.uniform_graphics_objects.$x.write_changes(&mut self.queue));*
             };
         }
-        bck!{() bck_write_changes!{bck_name_type!{}}}
+        macro_rules! bck_write_storage_changes {
+            {$s:tt {$(($x:ident : $t:ty))*}} => {
+                $(self.storage_graphics_objects.$x.write_changes(&mut self.queue));*
+            };
+        }
+        bck! {() bck_write_uniform_changes!{bck_uniform_name_type!{}}}
+        bck! {() bck_write_storage_changes!{bck_storage_name_type!{}}}
         self.queue.write_buffer(
             &self.screen_size_uniform,
             0,
@@ -702,9 +779,9 @@ impl<'a> App<'a> {
     fn update_logic_state(&mut self, new_time: Instant) {
         let dt = new_time.duration_since(self.fixed_time);
         self.camera_controller
-            .update_camera(&mut self.graphics_objects.camera.obj, dt);
+            .update_camera(&mut self.uniform_graphics_objects.camera.obj, dt);
         self.point_controller
-            .update_point(&mut self.graphics_objects.centre.obj, dt);
+            .update_point(&mut self.uniform_graphics_objects.centre.obj, dt);
 
         // Write all deferrable logic (not rendering) changes.
         // Maybe I should have wrapper logic just to set a bit telling me whether
@@ -795,7 +872,10 @@ impl<'a> ApplicationHandler for AppState<'a> {
                     &wgpu::DeviceDescriptor {
                         label: Some("device"),
                         required_features: wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
-                        required_limits: wgpu::Limits::default(),
+                        required_limits: wgpu::Limits {
+                            max_bind_groups: 5,
+                            ..Default::default()
+                        },
                         memory_hints: wgpu::MemoryHints::default(),
                     },
                     None,
@@ -900,7 +980,10 @@ impl<'a> ApplicationHandler for AppState<'a> {
                     l_state: ElementState::Released,
                 };
 
-                fn maker<T : ShaderType + WriteInto>(device: &wgpu::Device, bonk: T) -> UniformGraphicsObject<T> {
+                fn maker<T: ShaderType + WriteInto>(
+                    device: &wgpu::Device,
+                    bonk: T,
+                ) -> UniformGraphicsObject<T> {
                     let mut uniform = UniformBuffer::new(Vec::<u8>::new());
                     uniform.write(&bonk).unwrap();
                     let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -937,9 +1020,49 @@ impl<'a> ApplicationHandler for AppState<'a> {
                         bind_group: bg,
                     }
                 }
+                fn storage_maker<T: ShaderType + WriteInto>(
+                    device: &wgpu::Device,
+                    bonk: T,
+                ) -> StorageGraphicsObject<T> {
+                    let mut storage = StorageBuffer::new(Vec::<u8>::new());
+                    storage.write(&bonk).unwrap();
+                    let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: None,
+                        contents: storage.as_ref().as_slice(),
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    });
+                    let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                        label: None,
+                        entries: &[wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::all(),
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        }],
+                    });
+                    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: None,
+                        layout: &bgl,
+                        entries: &[wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: buffer.as_entire_binding(),
+                        }],
+                    });
+                    StorageGraphicsObject::<T> {
+                        obj: bonk,
+                        storage,
+                        buffer,
+                        bind_group_layout: bgl,
+                        bind_group: bg,
+                    }
+                }
 
                 let camera = Camera {
-                    frame: Matrix3::from_diagonal(Vector3::new(1.0, 1.0, -1.0)),
+                    frame: Matrix3::from_diagonal(Vector3::new(1.0, -1.0, -1.0)),
                     centre: Vector3::new(0.0, 0.0, 5.0),
                     ambient_index: 0,
                     yfov: PI / 2.,
@@ -949,27 +1072,52 @@ impl<'a> ApplicationHandler for AppState<'a> {
                 let centre = Vector4::<f32>::zero();
                 let centre_go = maker(&device, centre);
 
-                let graphics_objects = GraphicsObjects {
+                let feature_param = 0.5f32;
+                let feature_param_go = maker(&device, feature_param);
+
+                let uniform_graphics_objects = UniformGraphicsObjects {
                     camera: camera_go,
                     centre: centre_go,
+                    feature_param: feature_param_go,
                 };
 
-                macro_rules! bck_bind_group_layouts {
+                let ps_surface = construct_donut_vertex_info(1.0, 0.25, 36, 12);
+                let ps_surface_go = storage_maker(&device, ps_surface);
+
+                let storage_graphics_objects = StorageGraphicsObjects {
+                    surface: ps_surface_go,
+                };
+
+                macro_rules! bck_uniform_bind_group_layouts {
                     {$s:tt {$(($x:ident : $t:ty))*}} => {
                         bck! {
                             $s
                             &[
-                                &screen_bind_group_layout,
-                                $(&graphics_objects.$x.bind_group_layout),*
+                                $(&uniform_graphics_objects.$x.bind_group_layout),*
                             ]
                         }
                     };
                 }
 
+                macro_rules! bck_storage_bind_group_layouts {
+                    {$s:tt {$(($x:ident : $t:ty))*}} => {
+                        bck! {
+                            $s
+                            &[
+                                $(&storage_graphics_objects.$x.bind_group_layout),*
+                            ]
+                        }
+                    };
+                }
+
+                let mut bind_group_layouts = vec![&screen_bind_group_layout];
+                bind_group_layouts.append(&mut (bck!{() bck_uniform_bind_group_layouts!{bck_uniform_name_type!{}}}).to_vec());
+                bind_group_layouts.append(&mut (bck!{() bck_storage_bind_group_layouts!{bck_storage_name_type!{}}}).to_vec());
+
                 let render_pipeline_layout =
                     device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                         label: Some("render_pipeline_layout"),
-                        bind_group_layouts: bck!{() bck_bind_group_layouts!{bck_name_type!{}}},
+                        bind_group_layouts: &bind_group_layouts,
                         push_constant_ranges: &[],
                     });
 
@@ -1029,7 +1177,8 @@ impl<'a> ApplicationHandler for AppState<'a> {
                     fixed_time,
                     mouse_capture_mode,
                     cursor_is_visible,
-                    graphics_objects
+                    uniform_graphics_objects,
+                    storage_graphics_objects,
                 };
                 *self = Self::Initialized(app);
             }
