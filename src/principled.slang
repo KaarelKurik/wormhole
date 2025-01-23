@@ -114,10 +114,8 @@ struct Camera
 }
 
 // maybe constant buffer instead?
-[[vk::binding(0, 0)]]
 ConstantBuffer<Screen> screen;
 
-[[vk::binding(0, 1)]]
 ConstantBuffer<Camera> camera;
 
 interface Sdf
@@ -152,7 +150,6 @@ struct Torus : Sdf {
     }
 }
 
-[[vk::binding(0,2)]]
 ConstantBuffer<float4> sphereCenter;
 
 // StructuredBuffer<Torus> toruses;
@@ -186,9 +183,7 @@ float wendland(no_diff float h, float x) {
 
 // no idea if this binding trick could work - test it tmrw
 struct SurfaceParams : IDifferentiable {
-    [[vk::binding(0,4)]]
     StructuredBuffer<VertexInfo> points;
-    [[vk::binding(0,3)]]
     float support;
 }
 
